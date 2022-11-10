@@ -24,7 +24,8 @@ use ethers_core::{
         Address, Block, BlockId, BlockNumber, BlockTrace, Bytes, EIP1186ProofResponse, FeeHistory,
         Filter, FilterBlockOption, GethDebugTracingOptions, GethTrace, Log, NameOrAddress,
         Selector, Signature, Trace, TraceFilter, TraceType, Transaction, TransactionReceipt,
-        TransactionRequest, TxHash, TxpoolContent, TxpoolInspect, TxpoolStatus, H256, U256, U64,
+        TransactionRequest, TxHash, TxpoolContent, TxpoolInspect, TxpoolStatus, H160, H256, U256,
+        U64,
     },
     utils,
 };
@@ -762,6 +763,43 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         Ok(H256::from_slice(&Vec::from_hex(value)?))
     }
 
+    /// ============================== Custom API ============================
+    /// Get the storage of an address for a particular slot location
+    async fn batch_get_storage_at<T: Into<NameOrAddress> + Send + Sync>(
+        &self,
+        addrs: Vec<T>,
+        location: H256,
+        block: Option<BlockId>,
+    ) -> Result<Bytes, ProviderError> {
+        let addrs = addrs
+            .into_iter()
+            .map(|addr| match addr.into() {
+                NameOrAddress::Address(addr) => addr,
+                NameOrAddress::Name(_) => panic!("ens name not allowed for BatchGetStorageAt"),
+            })
+            .collect::<Vec<H160>>();
+
+        // position is a QUANTITY according to the [spec](https://eth.wiki/json-rpc/API#eth_getstorageat): integer of the position in the storage, converting this to a U256
+        // will make sure the number is formatted correctly as [quantity](https://eips.ethereum.org/EIPS/eip-1474#quantity)
+        let position = U256::from_big_endian(location.as_bytes());
+        let position = utils::serialize(&position);
+        let addrs = utils::serialize(&addrs);
+        let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
+
+        // get the hex encoded value.
+        let value: String = self.request("eth_batchGetStorageAt", [addrs, position, block]).await?;
+        // get rid of the 0x prefix and left pad it with zeroes.
+        let value = format!("{:0>64}", value.replace("0x", ""));
+
+        match Bytes::from_str(&value) {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => Err(ProviderError::CustomError(
+                "Invalid resp from eth_batchGetStorageAt".to_string(),
+            )),
+        }
+    }
+    /// ======================================================================
+
     /// Returns the deployed code at a given address
     async fn get_code<T: Into<NameOrAddress> + Send + Sync>(
         &self,
@@ -873,7 +911,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
                         };
                         let data = self.call(&tx.into(), None).await?;
                         if decode_bytes::<Address>(ParamType::Address, data) != owner {
-                            return Err(ProviderError::CustomError("Incorrect owner.".to_string()))
+                            return Err(ProviderError::CustomError("Incorrect owner.".to_string()));
                         }
                     }
                     erc::ERCNFTType::ERC1155 => {
@@ -893,7 +931,9 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
                         };
                         let data = self.call(&tx.into(), None).await?;
                         if decode_bytes::<u64>(ParamType::Uint(64), data) == 0 {
-                            return Err(ProviderError::CustomError("Incorrect balance.".to_string()))
+                            return Err(ProviderError::CustomError(
+                                "Incorrect balance.".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1130,6 +1170,17 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         self.subscribe(["newPendingTransactions"]).await
     }
 
+    //========================= Custom API ====================================
+    async fn subscribe_tx_pool_receipts(
+        &self,
+    ) -> Result<SubscriptionStream<'_, P, TransactionReceipt>, ProviderError>
+    where
+        P: PubsubClient,
+    {
+        self.subscribe(["txPoolReceipt"]).await
+    }
+    //=========================================================================
+
     async fn subscribe_logs<'a>(
         &'a self,
         filter: &Filter,
@@ -1189,7 +1240,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
                 if fallback.is_err() {
                     // if the older fallback also resulted in an error, we return the error from the
                     // initial attempt
-                    return err
+                    return err;
                 }
                 fallback
             }
@@ -1223,12 +1274,12 @@ impl<P: JsonRpcClient> Provider<P> {
 
         // otherwise, decode_bytes panics
         if data.0.is_empty() {
-            return Err(ProviderError::EnsError(ens_name.to_string()))
+            return Err(ProviderError::EnsError(ens_name.to_string()));
         }
 
         let resolver_address: Address = decode_bytes(ParamType::Address, data);
         if resolver_address == Address::zero() {
-            return Err(ProviderError::EnsError(ens_name.to_string()))
+            return Err(ProviderError::EnsError(ens_name.to_string()));
         }
 
         if let ParamType::Address = param {
@@ -1258,7 +1309,7 @@ impl<P: JsonRpcClient> Provider<P> {
             return Err(ProviderError::EnsError(format!(
                 "`{}` resolver ({:?}) is invalid.",
                 ens_name, resolver_address
-            )))
+            )));
         }
 
         let supports_selector = abi::decode(&[ParamType::Bool], data.as_ref())
@@ -1271,7 +1322,7 @@ impl<P: JsonRpcClient> Provider<P> {
                 ens_name,
                 resolver_address,
                 hex::encode(selector)
-            )))
+            )));
         }
 
         Ok(())

@@ -37,6 +37,7 @@ pub mod erc;
 use async_trait::async_trait;
 use auto_impl::auto_impl;
 use ethers_core::types::transaction::{eip2718::TypedTransaction, eip2930::AccessListWithGasUsed};
+use ethers_core::types::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{error::Error, fmt::Debug, future::Future, pin::Pin};
 use url::Url;
@@ -479,6 +480,17 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().get_storage_at(from, location, block).await.map_err(FromErr::from)
     }
 
+    /// ============================== Custom API ============================
+    async fn batch_get_storage_at<T: Into<NameOrAddress> + Send + Sync>(
+        &self,
+        from: Vec<T>,
+        location: H256,
+        block: Option<BlockId>,
+    ) -> Result<Bytes, Self::Error> {
+        self.inner().batch_get_storage_at(from, location, block).await.map_err(FromErr::from)
+    }
+    /// ======================================================================
+
     async fn get_proof<T: Into<NameOrAddress> + Send + Sync>(
         &self,
         from: T,
@@ -631,6 +643,17 @@ pub trait Middleware: Sync + Send + Debug {
     {
         self.inner().subscribe_pending_txs().await.map_err(FromErr::from)
     }
+
+    //========================= Custom API ====================================
+    async fn subscribe_tx_pool_receipts(
+        &self,
+    ) -> Result<SubscriptionStream<'_, Self::Provider, TransactionReceipt>, Self::Error>
+    where
+        <Self as Middleware>::Provider: PubsubClient,
+    {
+        self.inner().subscribe_tx_pool_receipts().await.map_err(FromErr::from)
+    }
+    //=========================================================================
 
     async fn subscribe_logs<'a>(
         &'a self,
