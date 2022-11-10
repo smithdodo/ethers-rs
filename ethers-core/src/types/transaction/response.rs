@@ -397,7 +397,7 @@ pub struct TransactionReceipt {
     #[serde(rename = "transactionHash")]
     pub transaction_hash: H256,
     /// Index within the block.
-    #[serde(rename = "transactionIndex")]
+    #[serde(rename = "transactionIndex", skip_deserializing)]
     pub transaction_index: U64,
     /// Hash of the block this transaction was included within.
     #[serde(rename = "blockHash")]
@@ -406,7 +406,7 @@ pub struct TransactionReceipt {
     #[serde(rename = "blockNumber")]
     pub block_number: Option<U64>,
     /// address of the sender.
-    pub from: Address,
+    pub from: Option<Address>,
     // address of the receiver. null when its a contract creation transaction.
     pub to: Option<Address>,
     /// Cumulative gas used within the block after this was executed.
@@ -425,7 +425,7 @@ pub struct TransactionReceipt {
     /// Status: either 1 (success) or 0 (failure). Only present after activation of [EIP-658](https://eips.ethereum.org/EIPS/eip-658)
     pub status: Option<U64>,
     /// State root. Only present before activation of [EIP-658](https://eips.ethereum.org/EIPS/eip-658)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub root: Option<H256>,
     /// Logs bloom
     #[serde(rename = "logsBloom")]
@@ -438,6 +438,10 @@ pub struct TransactionReceipt {
     /// amount that's actually paid by users can only be determined post-execution
     #[serde(rename = "effectiveGasPrice", default, skip_serializing_if = "Option::is_none")]
     pub effective_gas_price: Option<U256>,
+
+    // ===================== Custom Field =====================
+    #[serde(rename = "gasPrice", skip_serializing_if = "Option::is_none")]
+    pub gas_price: Option<U256>,
 }
 
 impl rlp::Encodable for TransactionReceipt {
