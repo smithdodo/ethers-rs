@@ -5,6 +5,7 @@
 #![doc = include_str!("../README.md")]
 mod transports;
 use futures_util::future::join_all;
+use serde_json::Value;
 pub use transports::*;
 
 mod provider;
@@ -489,6 +490,14 @@ pub trait Middleware: Sync + Send + Debug {
     ) -> Result<Bytes, Self::Error> {
         self.inner().batch_get_storage_at(from, location, block).await.map_err(FromErr::from)
     }
+
+    async fn call_bundle<T: Serialize + Debug + Send + Sync>(
+        &self,
+        bundle: T,
+    ) -> Result<Value, Self::Error> {
+        self.inner().call_bundle(bundle).await.map_err(FromErr::from)
+    }
+
     /// ======================================================================
 
     async fn get_proof<T: Into<NameOrAddress> + Send + Sync>(

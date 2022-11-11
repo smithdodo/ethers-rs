@@ -31,6 +31,7 @@ use ethers_core::{
 };
 use hex::FromHex;
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use url::{ParseError, Url};
 
@@ -201,7 +202,7 @@ impl<P: JsonRpcClient> Provider<P> {
     pub async fn request<T, R>(&self, method: &str, params: T) -> Result<R, ProviderError>
     where
         T: Debug + Serialize + Send + Sync,
-        R: Serialize + DeserializeOwned + Debug,
+        R: DeserializeOwned + Debug,
     {
         let span =
             tracing::trace_span!("rpc", method = method, params = ?serde_json::to_string(&params)?);
@@ -209,7 +210,7 @@ impl<P: JsonRpcClient> Provider<P> {
         let res = async move {
             trace!("tx");
             let res: R = self.inner.request(method, params).await.map_err(Into::into)?;
-            trace!(rx = ?serde_json::to_string(&res)?);
+            // trace!(rx = ?serde_json::to_string(&res)?);
             Ok::<_, ProviderError>(res)
         }
         .instrument(span)
@@ -796,6 +797,18 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
             Err(_) => Err(ProviderError::CustomError(
                 "Invalid resp from eth_batchGetStorageAt".to_string(),
             )),
+        }
+    }
+    async fn call_bundle<T: Serialize + Debug + Send + Sync>(
+        &self,
+        bundle: T,
+    ) -> Result<Value, ProviderError> {
+        match self.request("eth_callBundle", [bundle]).await {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                println!("call_bundle err: {:?}", err);
+                Err(err)
+            }
         }
     }
     /// ======================================================================
