@@ -28,8 +28,8 @@ pub const MULTICALL_ADDRESS: Address = H160([
 ]);
 
 /// The chain IDs that [`MULTICALL_ADDRESS`] has been deployed to.
-/// Taken from: https://github.com/mds1/multicall#multicall3-contract-addresses
-pub static MULTICALL_SUPPORTED_CHAIN_IDS: Lazy<[U256; 47]> = Lazy::new(|| {
+/// Taken from: <https://github.com/mds1/multicall#multicall3-contract-addresses>
+pub static MULTICALL_SUPPORTED_CHAIN_IDS: Lazy<[U256; 48]> = Lazy::new(|| {
     use Chain::*;
     [
         U256::from(Mainnet),                  // Mainnet
@@ -42,11 +42,12 @@ pub static MULTICALL_SUPPORTED_CHAIN_IDS: Lazy<[U256; 47]> = Lazy::new(|| {
         U256::from(OptimismGoerli),           // OptimismGoerli
         U256::from(OptimismKovan),            // OptimismKovan
         U256::from(Arbitrum),                 // Arbitrum
-        U256::from(421613),                   // ArbitrumGoerli,
+        U256::from(ArbitrumGoerli),           // ArbitrumGoerli,
         U256::from(ArbitrumTestnet),          // Arbitrum Rinkeby
         U256::from(Polygon),                  // Polygon
         U256::from(PolygonMumbai),            // PolygonMumbai
         U256::from(XDai),                     // XDai
+        U256::from(Chiado),                   // ChiadoTestnet
         U256::from(Avalanche),                // Avalanche
         U256::from(AvalancheFuji),            // AvalancheFuji
         U256::from(FantomTestnet),            // FantomTestnet
@@ -139,7 +140,7 @@ impl TryFrom<u8> for MulticallVersion {
             1 => Ok(MulticallVersion::Multicall),
             2 => Ok(MulticallVersion::Multicall2),
             3 => Ok(MulticallVersion::Multicall3),
-            _ => Err(format!("Invalid Multicall version: {}. Accepted values: 1, 2, 3.", v)),
+            _ => Err(format!("Invalid Multicall version: {v}. Accepted values: 1, 2, 3.")),
         }
     }
 }

@@ -30,8 +30,9 @@ pub enum Chain {
     Rinkeby = 4,
     Goerli = 5,
     Kovan = 42,
-    #[strum(serialize = "xdai")]
+    #[strum(serialize = "gnosis")]
     XDai = 100,
+    Chiado = 10200,
     Polygon = 137,
     Fantom = 250,
     Dev = 1337,
@@ -103,6 +104,7 @@ impl Chain {
             Chain::Goerli |
             Chain::Kovan |
             Chain::XDai |
+            Chain::Chiado |
             Chain::Sepolia |
             Chain::Moonbase |
             Chain::MoonbeamDev |
@@ -186,6 +188,9 @@ impl Chain {
             Chain::XDai => {
                 ("https://blockscout.com/xdai/mainnet/api", "https://blockscout.com/xdai/mainnet")
             }
+            Chain::Chiado => {
+                ("https://blockscout.chiadochain.net/api", "https://blockscout.chiadochain.net")
+            }
             Chain::Sokol => {
                 ("https://blockscout.com/poa/sokol/api", "https://blockscout.com/poa/sokol")
             }
@@ -229,7 +234,8 @@ impl fmt::Display for Chain {
             Chain::Rinkeby => "rinkeby",
             Chain::Goerli => "goerli",
             Chain::Kovan => "kovan",
-            Chain::XDai => "xdai",
+            Chain::XDai => "gnosis",
+            Chain::Chiado => "chiado",
             Chain::Polygon => "polygon",
             Chain::PolygonMumbai => "mumbai",
             Chain::Avalanche => "avalanche",
@@ -265,7 +271,7 @@ impl fmt::Display for Chain {
             Chain::AuroraTestnet => "aurora-testnet",
         };
 
-        write!(formatter, "{}", chain)
+        write!(formatter, "{chain}")
     }
 }
 
@@ -299,6 +305,7 @@ impl TryFrom<u64> for Chain {
             5 => Chain::Goerli,
             42 => Chain::Kovan,
             100 => Chain::XDai,
+            10200 => Chain::Chiado,
             137 => Chain::Polygon,
             1337 => Chain::Dev,
             31337 => Chain::AnvilHardhat,
@@ -358,7 +365,8 @@ impl FromStr for Chain {
             "rinkeby" => Chain::Rinkeby,
             "goerli" => Chain::Goerli,
             "kovan" => Chain::Kovan,
-            "xdai" => Chain::XDai,
+            "xdai" | "gnosis" | "gnosis-chain" => Chain::XDai,
+            "chiado" => Chain::Chiado,
             "polygon" => Chain::Polygon,
             "mumbai" | "polygon-mumbai" => Chain::PolygonMumbai,
             "avalanche" => Chain::Avalanche,
