@@ -395,7 +395,7 @@ pub struct TransactionReceipt {
     #[serde(rename = "transactionHash")]
     pub transaction_hash: H256,
     /// Index within the block.
-    #[serde(rename = "transactionIndex", skip_deserializing)]
+    #[serde(rename = "transactionIndex")]
     pub transaction_index: U64,
     /// Hash of the block this transaction was included within.
     #[serde(rename = "blockHash")]
