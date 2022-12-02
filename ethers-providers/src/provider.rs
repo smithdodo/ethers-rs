@@ -38,9 +38,14 @@ use url::{ParseError, Url};
 use ethers_core::types::Chain;
 use futures_util::{lock::Mutex, try_join};
 use std::{
-    collections::VecDeque, convert::TryFrom, fmt::Debug, str::FromStr, sync::Arc, time::Duration,
+    collections::VecDeque,
+    convert::TryFrom,
+    fmt::Debug,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
 };
-use tracing::trace;
+use tracing::{debug, field, trace};
 use tracing_futures::Instrument;
 
 #[derive(Copy, Clone)]
@@ -205,11 +210,13 @@ impl<P: JsonRpcClient> Provider<P> {
         R: DeserializeOwned + Debug,
     {
         let span =
-            tracing::trace_span!("rpc", method = method, params = ?serde_json::to_string(&params)?);
+            // tracing::trace_span!("rpc", method = method, params = ?serde_json::to_string(&params)?);
+            tracing::trace_span!("rpc", method = method, elapsed=field::Empty);
         // https://docs.rs/tracing/0.1.22/tracing/span/struct.Span.html#in-asynchronous-code
         let res = async move {
-            trace!("tx");
+            let start = Instant::now();
             let res: R = self.inner.request(method, params).await.map_err(Into::into)?;
+            debug!(elapsed=?start.elapsed());
             // trace!(rx = ?serde_json::to_string(&res)?);
             Ok::<_, ProviderError>(res)
         }
