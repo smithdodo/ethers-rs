@@ -438,8 +438,8 @@ pub struct TransactionReceipt {
     pub effective_gas_price: Option<U256>,
 
     // ===================== Custom Field =====================
-    #[serde(rename = "gasPrice", skip_serializing_if = "Option::is_none")]
-    pub gas_price: Option<U256>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<Transaction>,
 }
 
 impl rlp::Encodable for TransactionReceipt {
