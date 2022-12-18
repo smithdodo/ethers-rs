@@ -498,6 +498,13 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().call_bundle(bundle).await.map_err(FromErr::from)
     }
 
+    async fn send_puissant<T: Serialize + Debug + Send + Sync>(
+        &self,
+        bundle: T,
+    ) -> Result<Value, Self::Error> {
+        self.inner().send_puissant(bundle).await.map_err(FromErr::from)
+    }
+
     /// ======================================================================
 
     async fn get_proof<T: Into<NameOrAddress> + Send + Sync>(

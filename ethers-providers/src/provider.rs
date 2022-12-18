@@ -818,6 +818,18 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
             }
         }
     }
+    async fn send_puissant<T: Serialize + Debug + Send + Sync>(
+        &self,
+        bundle: T,
+    ) -> Result<Value, ProviderError> {
+        match self.request("eth_sendPuissant", [bundle]).await {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                println!("call_bundle err: {:?}", err);
+                Err(err)
+            }
+        }
+    }
     /// ======================================================================
 
     /// Returns the deployed code at a given address
