@@ -830,6 +830,13 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
             }
         }
     }
+    async fn get_transaction_receipts_by_block_number<T: Send + Sync + Into<BlockNumber>>(
+        &self,
+        block_number: T,
+    ) -> Result<Option<Vec<TransactionReceipt>>, ProviderError> {
+        let block_number = block_number.into();
+        self.request("eth_getTransactionReceiptsByBlockNumber", [block_number]).await
+    }
     /// ======================================================================
 
     /// Returns the deployed code at a given address

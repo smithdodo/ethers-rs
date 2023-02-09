@@ -505,6 +505,16 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().send_puissant(bundle).await.map_err(FromErr::from)
     }
 
+    async fn get_transaction_receipts_by_block_number<T: Send + Sync + Into<BlockNumber>>(
+        &self,
+        block_number: T,
+    ) -> Result<Option<Vec<TransactionReceipt>>, ProviderError> {
+        self.inner()
+            .get_transaction_receipts_by_block_number(block_number)
+            .await
+            .map_err(FromErr::from)
+    }
+
     /// ======================================================================
 
     async fn get_proof<T: Into<NameOrAddress> + Send + Sync>(
