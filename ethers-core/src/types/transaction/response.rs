@@ -1,7 +1,7 @@
 //! Transaction types
 use super::{
-    decode_signature, eip2718::TypedTransaction, eip2930::AccessList, normalize_v, rlp_opt,
-    rlp_opt_list,
+    decode_signature, decode_to, eip2718::TypedTransaction, eip2930::AccessList, normalize_v,
+    rlp_opt, rlp_opt_list,
 };
 use crate::{
     types::{
@@ -248,8 +248,7 @@ impl Transaction {
         *offset += 1;
         self.gas = rlp.val_at(*offset)?;
         *offset += 1;
-        self.to = Some(rlp.val_at(*offset)?);
-        *offset += 1;
+        self.to = decode_to(rlp, offset)?;
         self.value = rlp.val_at(*offset)?;
         *offset += 1;
         let input = rlp::Rlp::new(rlp.at(*offset)?.as_raw()).data()?;
@@ -279,8 +278,7 @@ impl Transaction {
         #[cfg(feature = "celo")]
         self.decode_celo_metadata(rlp, offset)?;
 
-        self.to = Some(rlp.val_at(*offset)?);
-        *offset += 1;
+        self.to = decode_to(rlp, offset)?;
         self.value = rlp.val_at(*offset)?;
         *offset += 1;
         let input = rlp::Rlp::new(rlp.at(*offset)?.as_raw()).data()?;
@@ -310,8 +308,7 @@ impl Transaction {
         #[cfg(feature = "celo")]
         self.decode_celo_metadata(rlp, offset)?;
 
-        self.to = Some(rlp.val_at(*offset)?);
-        *offset += 1;
+        self.to = decode_to(rlp, offset)?;
         self.value = rlp.val_at(*offset)?;
         *offset += 1;
         let input = rlp::Rlp::new(rlp.at(*offset)?.as_raw()).data()?;
@@ -338,7 +335,7 @@ impl Transaction {
 /// Get a Transaction directly from a rlp encoded byte stream
 impl Decodable for Transaction {
     fn decode(rlp: &rlp::Rlp) -> Result<Self, DecoderError> {
-        let mut txn = Self::default();
+        let mut txn = Self { hash: H256(keccak256(rlp.as_raw())), ..Default::default() };
         // we can get the type from the first value
         let mut offset = 0;
 
@@ -437,6 +434,11 @@ pub struct TransactionReceipt {
     #[serde(rename = "effectiveGasPrice", default, skip_serializing_if = "Option::is_none")]
     pub effective_gas_price: Option<U256>,
 
+    /// Captures unknown fields such as additional fields used by L2s
+    #[cfg(not(feature = "celo"))]
+    #[serde(flatten)]
+    pub other: crate::types::OtherFields,
+
     // ===================== Custom Field =====================
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx: Option<Transaction>,
@@ -477,7 +479,7 @@ impl PartialOrd<Self> for TransactionReceipt {
 #[cfg(test)]
 #[cfg(not(feature = "celo"))]
 mod tests {
-    use rlp::Encodable;
+    use rlp::{Encodable, Rlp};
 
     use crate::types::transaction::eip2930::AccessListItem;
 
@@ -884,6 +886,19 @@ mod tests {
         );
     }
 
+    // Reference tx hash on Ethereum mainnet:
+    // 0x938913ef1df8cd17e0893a85586ade463014559fb1bd2d536ac282f3b1bdea53
+    #[test]
+    fn decode_tx_assert_hash() {
+        let raw_tx = hex::decode("02f874018201bb8405f5e10085096a1d45b782520894d696a5c568160bbbf5a1356f8ac56ee81a190588871550f7dca7000080c080a07df2299b0181d6d5b817795a7d2eff5897d0d3914ff5f602e17d5b75d32ec25fa051833973e8a8c222e682d2dcea02ad7bf3ec5bc3a86bfbcdbbaa3b853e52ad08").unwrap();
+        let tx: Transaction = Transaction::decode(&Rlp::new(&raw_tx)).unwrap();
+        assert_eq!(
+            tx.hash,
+            H256::from_str("938913ef1df8cd17e0893a85586ade463014559fb1bd2d536ac282f3b1bdea53")
+                .unwrap()
+        )
+    }
+
     #[test]
     fn recover_from() {
         let tx = Transaction {
@@ -1096,5 +1111,25 @@ mod tests {
         let b = hex::decode(s).unwrap();
         let r = rlp::Rlp::new(b.as_slice());
         Transaction::decode(&r).unwrap();
+    }
+
+    #[test]
+    fn test_rlp_decoding_create_roundtrip() {
+        let tx = Transaction {
+            block_hash: None,
+            block_number: None,
+            from: Address::from_str("c26ad91f4e7a0cad84c4b9315f420ca9217e315d").unwrap(),
+            gas: U256::from_str_radix("0x10e2b", 16).unwrap(),
+            gas_price: Some(U256::from_str_radix("0x12ec276caf", 16).unwrap()),
+            hash: H256::from_str("929ff27a5c7833953df23103c4eb55ebdfb698678139d751c51932163877fada").unwrap(),
+            input: Bytes::from(
+                hex::decode("a9059cbb000000000000000000000000fdae129ecc2c27d166a3131098bc05d143fa258e0000000000000000000000000000000000000000000000000000000002faf080").unwrap()
+            ),
+            nonce: U256::zero(),
+            transaction_index: None,
+            value: U256::zero(),
+            ..Default::default()
+        };
+        Transaction::decode(&Rlp::new(&tx.rlp())).unwrap();
     }
 }

@@ -1,17 +1,15 @@
-use crate::Contract;
-
+use crate::ContractInstance;
 pub use ethers_core::abi::AbiError;
 use ethers_core::{
     abi::{Abi, Detokenize, Error, Event, Function, FunctionExt, RawLog, Token, Tokenize},
     types::{Address, Bytes, Selector, H256},
 };
 use ethers_providers::Middleware;
-
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, HashMap},
     fmt::Debug,
     hash::Hash,
-    sync::Arc,
 };
 
 /// A reduced form of `Contract` which just takes the `abi` and produces
@@ -159,6 +157,8 @@ impl BaseContract {
         decode_function_data(function, bytes, true)
     }
 
+    /// Decode the provided ABI encoded bytes as the output of the provided
+    /// function selector
     pub fn decode_output_with_selector<D: Detokenize, T: AsRef<[u8]>>(
         &self,
         signature: Selector,
@@ -195,12 +195,12 @@ impl BaseContract {
     }
 
     /// Upgrades a `BaseContract` into a full fledged contract with an address and middleware.
-    pub fn into_contract<M: Middleware>(
-        self,
-        address: Address,
-        client: impl Into<Arc<M>>,
-    ) -> Contract<M> {
-        Contract::new(address, self, client)
+    pub fn into_contract<B, M>(self, address: Address, client: B) -> ContractInstance<B, M>
+    where
+        B: Borrow<M>,
+        M: Middleware,
+    {
+        ContractInstance::new(address, self, client)
     }
 }
 

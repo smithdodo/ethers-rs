@@ -10,6 +10,10 @@ mod geth;
 #[cfg(not(target_arch = "wasm32"))]
 pub use geth::{Geth, GethInstance};
 
+/// Utilities for working with a `genesis.json` and other chain config structs.
+mod genesis;
+pub use genesis::{ChainConfig, CliqueConfig, EthashConfig, Genesis, GenesisAccount};
+
 /// Utilities for launching an anvil instance
 #[cfg(not(target_arch = "wasm32"))]
 mod anvil;
@@ -23,6 +27,7 @@ mod hash;
 pub use hash::{hash_message, id, keccak256, serialize};
 
 mod units;
+use serde::{Deserialize, Deserializer};
 pub use units::Units;
 
 /// Re-export RLP
@@ -31,13 +36,14 @@ pub use rlp;
 /// Re-export hex
 pub use hex;
 
-use crate::types::{Address, Bytes, ParseI256Error, I256, U256};
-use elliptic_curve::sec1::ToEncodedPoint;
+use crate::types::{Address, Bytes, ParseI256Error, H256, I256, U256, U64};
 use ethabi::ethereum_types::FromDecStrErr;
-use k256::{ecdsa::SigningKey, PublicKey as K256PublicKey};
+use k256::ecdsa::SigningKey;
 use std::{
+    collections::HashMap,
     convert::{TryFrom, TryInto},
     fmt,
+    str::FromStr,
 };
 use thiserror::Error;
 
@@ -206,10 +212,7 @@ where
 /// assert_eq!(eth, parse_ether(1usize).unwrap());
 /// assert_eq!(eth, parse_ether("1").unwrap());
 /// ```
-pub fn parse_ether<S>(eth: S) -> Result<U256, ConversionError>
-where
-    S: ToString,
-{
+pub fn parse_ether<S: ToString>(eth: S) -> Result<U256, ConversionError> {
     Ok(parse_units(eth, "ether")?.into())
 }
 
@@ -302,10 +305,11 @@ pub fn get_contract_address(sender: impl Into<Address>, nonce: impl Into<U256>) 
 /// keccak256( 0xff ++ senderAddress ++ salt ++ keccak256(init_code))[12..]
 pub fn get_create2_address(
     from: impl Into<Address>,
-    salt: impl Into<Bytes>,
-    init_code: impl Into<Bytes>,
+    salt: impl AsRef<[u8]>,
+    init_code: impl AsRef<[u8]>,
 ) -> Address {
-    get_create2_address_from_hash(from, salt, keccak256(init_code.into().as_ref()).to_vec())
+    let init_code_hash = keccak256(init_code.as_ref());
+    get_create2_address_from_hash(from, salt, init_code_hash)
 }
 
 /// Returns the CREATE2 address of a smart contract as specified in
@@ -326,9 +330,7 @@ pub fn get_create2_address(
 ///     utils::{get_create2_address_from_hash, keccak256},
 /// };
 ///
-/// let UNISWAP_V3_POOL_INIT_CODE_HASH = Bytes::from(
-///     hex::decode("e34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54").unwrap(),
-/// );
+/// let init_code_hash = hex::decode("e34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54").unwrap();
 /// let factory: Address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 ///     .parse()
 ///     .unwrap();
@@ -338,19 +340,18 @@ pub fn get_create2_address(
 /// let token1: Address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 ///     .parse()
 ///     .unwrap();
-/// let fee = 500;
+/// let fee = U256::from(500_u64);
 ///
 /// // abi.encode(token0 as address, token1 as address, fee as uint256)
-/// let input = abi::encode(&vec![
+/// let input = abi::encode(&[
 ///     Token::Address(token0),
 ///     Token::Address(token1),
-///     Token::Uint(U256::from(fee)),
+///     Token::Uint(fee),
 /// ]);
 ///
 /// // keccak256(abi.encode(token0, token1, fee))
 /// let salt = keccak256(&input);
-/// let pool_address =
-///     get_create2_address_from_hash(factory, salt.to_vec(), UNISWAP_V3_POOL_INIT_CODE_HASH);
+/// let pool_address = get_create2_address_from_hash(factory, salt, init_code_hash);
 ///
 /// assert_eq!(
 ///     pool_address,
@@ -361,12 +362,18 @@ pub fn get_create2_address(
 /// ```
 pub fn get_create2_address_from_hash(
     from: impl Into<Address>,
-    salt: impl Into<Bytes>,
-    init_code_hash: impl Into<Bytes>,
+    salt: impl AsRef<[u8]>,
+    init_code_hash: impl AsRef<[u8]>,
 ) -> Address {
-    let bytes =
-        [&[0xff], from.into().as_bytes(), salt.into().as_ref(), init_code_hash.into().as_ref()]
-            .concat();
+    let from = from.into();
+    let salt = salt.as_ref();
+    let init_code_hash = init_code_hash.as_ref();
+
+    let mut bytes = Vec::with_capacity(1 + 20 + salt.len() + init_code_hash.len());
+    bytes.push(0xff);
+    bytes.extend_from_slice(from.as_bytes());
+    bytes.extend_from_slice(salt);
+    bytes.extend_from_slice(init_code_hash);
 
     let hash = keccak256(bytes);
 
@@ -377,16 +384,25 @@ pub fn get_create2_address_from_hash(
 
 /// Converts a K256 SigningKey to an Ethereum Address
 pub fn secret_key_to_address(secret_key: &SigningKey) -> Address {
-    let public_key = K256PublicKey::from(&secret_key.verifying_key());
+    let public_key = secret_key.verifying_key();
     let public_key = public_key.to_encoded_point(/* compress = */ false);
     let public_key = public_key.as_bytes();
     debug_assert_eq!(public_key[0], 0x04);
     let hash = keccak256(&public_key[1..]);
-    Address::from_slice(&hash[12..])
+
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&hash[12..]);
+    Address::from(bytes)
 }
 
-/// Converts an Ethereum address to the checksum encoding
-/// Ref: <https://github.com/ethereum/EIPs/blob/master/EIPS/eip-55.md>
+/// Encodes an Ethereum address to its [EIP-55] checksum.
+///
+/// You can optionally specify an [EIP-155 chain ID] to encode the address using the [EIP-1191]
+/// extension.
+///
+/// [EIP-55]: https://eips.ethereum.org/EIPS/eip-55
+/// [EIP-155 chain ID]: https://eips.ethereum.org/EIPS/eip-155
+/// [EIP-1191]: https://eips.ethereum.org/EIPS/eip-1191
 pub fn to_checksum(addr: &Address, chain_id: Option<u8>) -> String {
     let prefixed_addr = match chain_id {
         Some(chain_id) => format!("{chain_id}0x{addr:x}"),
@@ -452,6 +468,103 @@ pub fn eip1559_default_estimator(base_fee_per_gas: U256, rewards: Vec<Vec<U256>>
     (max_fee_per_gas, max_priority_fee_per_gas)
 }
 
+/// Converts a Bytes value into a H256, accepting inputs that are less than 32 bytes long. These
+/// inputs will be left padded with zeros.
+pub fn from_bytes_to_h256<'de, D>(bytes: Bytes) -> Result<H256, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if bytes.0.len() > 32 {
+        return Err(serde::de::Error::custom("input too long to be a H256"))
+    }
+
+    // left pad with zeros to 32 bytes
+    let mut padded = [0u8; 32];
+    padded[32 - bytes.0.len()..].copy_from_slice(&bytes.0);
+
+    // then convert to H256 without a panic
+    Ok(H256::from_slice(&padded))
+}
+
+/// Deserializes the input into an Option<HashMap<H256, H256>>, using from_unformatted_hex to
+/// deserialize the keys and values.
+pub fn from_unformatted_hex_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<H256, H256>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map = Option::<HashMap<Bytes, Bytes>>::deserialize(deserializer)?;
+    match map {
+        Some(mut map) => {
+            let mut res_map = HashMap::new();
+            for (k, v) in map.drain() {
+                let k_deserialized = from_bytes_to_h256::<'de, D>(k)?;
+                let v_deserialized = from_bytes_to_h256::<'de, D>(v)?;
+                res_map.insert(k_deserialized, v_deserialized);
+            }
+            Ok(Some(res_map))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Deserializes the input into a U256, accepting both 0x-prefixed hex and decimal strings with
+/// arbitrary precision, defined by serde_json's [`Number`](serde_json::Number).
+pub fn from_int_or_hex<'de, D>(deserializer: D) -> Result<U256, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrHex {
+        Int(serde_json::Number),
+        Hex(String),
+    }
+
+    match IntOrHex::deserialize(deserializer)? {
+        IntOrHex::Hex(s) => U256::from_str(s.as_str()).map_err(serde::de::Error::custom),
+        IntOrHex::Int(n) => U256::from_dec_str(&n.to_string()).map_err(serde::de::Error::custom),
+    }
+}
+
+/// Deserializes the input into a U64, accepting both 0x-prefixed hex and decimal strings with
+/// arbitrary precision, defined by serde_json's [`Number`](serde_json::Number).
+pub fn from_u64_or_hex<'de, D>(deserializer: D) -> Result<U64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrHex {
+        Int(serde_json::Number),
+        Hex(String),
+    }
+
+    match IntOrHex::deserialize(deserializer)? {
+        IntOrHex::Hex(s) => U64::from_str(s.as_str()).map_err(serde::de::Error::custom),
+        IntOrHex::Int(n) => U64::from_dec_str(&n.to_string()).map_err(serde::de::Error::custom),
+    }
+}
+
+/// Deserializes the input into an `Option<U256>`, using [`from_int_or_hex`] to deserialize the
+/// inner value.
+pub fn from_int_or_hex_opt<'de, D>(deserializer: D) -> Result<Option<U256>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(from_int_or_hex(deserializer)?))
+}
+
+/// Deserializes the input into an `Option<u64>`, using [`from_u64_or_hex`] to deserialize the
+/// inner value.
+pub fn from_u64_or_hex_opt<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(from_u64_or_hex(deserializer)?.as_u64()))
+}
+
 fn estimate_priority_fee(rewards: Vec<Vec<U256>>) -> U256 {
     let mut rewards: Vec<U256> =
         rewards.iter().map(|r| r[0]).filter(|r| *r > U256::zero()).collect();
@@ -475,7 +588,7 @@ fn estimate_priority_fee(rewards: Vec<Vec<U256>>) -> U256 {
         .map(|(a, b)| {
             let a = I256::try_from(*a).expect("priority fee overflow");
             let b = I256::try_from(*b).expect("priority fee overflow");
-            ((b - a) * 100.into()) / a
+            ((b - a) * 100) / a
         })
         .collect();
     percentage_change.pop();
@@ -510,18 +623,24 @@ fn base_fee_surged(base_fee_per_gas: U256) -> U256 {
     }
 }
 
-/// A bit of hack to find an unused TCP port.
+/// A bit of hack to find unused TCP ports.
 ///
 /// Does not guarantee that the given port is unused after the function exists, just that it was
 /// unused before the function started (i.e., it does not reserve a port).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn unused_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to create TCP listener to find unused port");
+pub(crate) fn unused_ports<const N: usize>() -> [u16; N] {
+    use std::net::{SocketAddr, TcpListener};
 
-    let local_addr =
-        listener.local_addr().expect("Failed to read TCP listener local_addr to find unused port");
-    local_addr.port()
+    std::array::from_fn(|_| {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        TcpListener::bind(addr).expect("Failed to create TCP listener to find unused port")
+    })
+    .map(|listener| {
+        listener
+            .local_addr()
+            .expect("Failed to read TCP listener local_addr to find unused port")
+            .port()
+    })
 }
 
 #[cfg(test)]

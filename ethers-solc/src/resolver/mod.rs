@@ -46,7 +46,9 @@
 //! [version pragma](https://docs.soliditylang.org/en/develop/layout-of-source-files.html#version-pragma),
 //! which is defined on a per source file basis.
 
-use crate::{error::Result, utils, IncludePaths, ProjectPathsConfig, SolcError, Source, Sources};
+use crate::{
+    error::Result, utils, IncludePaths, ProjectPathsConfig, SolcError, SolcVersion, Source, Sources,
+};
 use parse::{SolData, SolDataUnit, SolImport};
 use rayon::prelude::*;
 use semver::VersionReq;
@@ -59,6 +61,7 @@ use std::{
 mod parse;
 mod tree;
 
+use crate::utils::find_case_sensitive_existing_file;
 pub use parse::SolImportAlias;
 pub use tree::{print, Charset, TreeOptions};
 
@@ -178,7 +181,9 @@ impl GraphEdges {
     ///
     /// This is a preprocess function that attempts to resolve those libraries that will the
     /// solidity `file` will be required to link. And further restrict this list to libraries
-    /// that won't be inlined See also [SolLibrary](parse::SolLibrary)
+    /// that won't be inlined.
+    ///
+    /// See also `parse::SolLibrary`.
     pub fn get_link_references(&self, file: impl AsRef<Path>) -> HashSet<&PathBuf> {
         let mut link_references = HashSet::new();
         for import in self.all_imported_nodes(self.node_id(file)) {
@@ -371,10 +376,12 @@ impl Graph {
                         add_node(&mut unresolved, &mut index, &mut resolved_imports, import)
                             .map_err(|err| {
                                 match err {
-                                    SolcError::Resolve(err) => {
-                                        // make the error more verbose
+                                    err @ SolcError::ResolveCaseSensitiveFileName { .. } |
+                                    err @ SolcError::Resolve(_) => {
+                                        // make the error more helpful by providing additional
+                                        // context
                                         SolcError::FailedResolveImport(
-                                            err,
+                                            Box::new(err),
                                             node.path.clone(),
                                             import_path.clone(),
                                         )
@@ -432,7 +439,7 @@ impl Graph {
     }
 }
 
-#[cfg(all(feature = "svm-solc"))]
+#[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
 impl Graph {
     /// Consumes the nodes of the graph and returns all input files together with their appropriate
     /// version and the edges of the graph
@@ -452,17 +459,20 @@ impl Graph {
             all_nodes: &mut HashMap<usize, (PathBuf, Source)>,
             sources: &mut Sources,
             edges: &[Vec<usize>],
-            num_input_files: usize,
+            processed_sources: &mut HashSet<usize>,
         ) {
+            // iterate over all dependencies not processed yet
             for dep in edges[idx].iter().copied() {
-                // we only process nodes that were added as part of the resolve step because input
-                // nodes are handled separately
-                if dep >= num_input_files {
-                    // library import
-                    if let Some((path, source)) = all_nodes.remove(&dep) {
-                        sources.insert(path, source);
-                        insert_imports(dep, all_nodes, sources, edges, num_input_files);
-                    }
+                // keep track of processed dependencies, if the dep was already in the set we have
+                // processed it already
+                if !processed_sources.insert(dep) {
+                    continue
+                }
+
+                // library import
+                if let Some((path, source)) = all_nodes.get(&dep).cloned() {
+                    sources.insert(path, source);
+                    insert_imports(dep, all_nodes, sources, edges, processed_sources);
                 }
             }
         }
@@ -477,17 +487,21 @@ impl Graph {
         // determine the `Sources` set for each solc version
         for (version, input_node_indices) in versioned_nodes {
             let mut sources = Sources::new();
+
+            // all input nodes will be processed
+            let mut processed_sources = input_node_indices.iter().copied().collect();
+
             // we only process input nodes (from sources, tests for example)
             for idx in input_node_indices {
                 // insert the input node in the sources set and remove it from the available set
-                let (path, source) = all_nodes.remove(&idx).expect("node is preset. qed");
+                let (path, source) = all_nodes.get(&idx).cloned().expect("node is preset. qed");
                 sources.insert(path, source);
                 insert_imports(
                     idx,
                     &mut all_nodes,
                     &mut sources,
                     &edges.edges,
-                    edges.num_input_files,
+                    &mut processed_sources,
                 );
             }
             versioned_sources.insert(version, sources);
@@ -565,8 +579,7 @@ impl Graph {
         // on first error, instead gather all the errors and return a bundled error message instead
         let mut errors = Vec::new();
         // we also  don't want duplicate error diagnostic
-        let mut erroneous_nodes =
-            std::collections::HashSet::with_capacity(self.edges.num_input_files);
+        let mut erroneous_nodes = HashSet::with_capacity(self.edges.num_input_files);
 
         // the sorted list of all versions
         let all_versions = if offline { Solc::installed_versions() } else { Solc::all_versions() };
@@ -584,12 +597,20 @@ impl Graph {
             self.retain_compatible_versions(idx, &mut candidates);
 
             if candidates.is_empty() && !erroneous_nodes.contains(&idx) {
-                let mut msg = String::new();
-                self.format_imports_list(idx, &mut msg).unwrap();
-                errors.push(format!(
-                    "Discovered incompatible solidity versions in following\n: {}",
-                    msg
-                ));
+                // check if the version is even valid
+                if let Some(Err(version_err)) =
+                    self.node(idx).check_available_version(&all_versions, offline)
+                {
+                    let f = utils::source_name(&self.node(idx).path, &self.root).display();
+                    errors.push(format!("Encountered invalid solc version in {f}: {version_err}"));
+                } else {
+                    let mut msg = String::new();
+                    self.format_imports_list(idx, &mut msg).unwrap();
+                    errors.push(format!(
+                        "Discovered incompatible solidity versions in following\n: {msg}"
+                    ));
+                }
+
                 erroneous_nodes.insert(idx);
             } else {
                 // found viable candidates, pick the most recent version that's already installed
@@ -650,7 +671,7 @@ impl Graph {
                 return Vec::new()
             }
 
-            let mut result = sets.pop().cloned().expect("not empty; qed.").clone();
+            let mut result = sets.pop().cloned().expect("not empty; qed.");
             if !sets.is_empty() {
                 result.retain(|item| sets.iter().all(|set| set.contains(item)));
             }
@@ -748,7 +769,7 @@ impl<'a> Iterator for NodesIter<'a> {
 }
 
 /// Container type for solc versions and their compatible sources
-#[cfg(all(feature = "svm-solc"))]
+#[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
 #[derive(Debug)]
 pub struct VersionedSources {
     resolved_solc_include_paths: IncludePaths,
@@ -756,7 +777,7 @@ pub struct VersionedSources {
     offline: bool,
 }
 
-#[cfg(all(feature = "svm-solc"))]
+#[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
 impl VersionedSources {
     /// Resolves or installs the corresponding `Solc` installation.
     ///
@@ -777,8 +798,7 @@ impl VersionedSources {
             let solc = if !version.is_installed() {
                 if self.offline {
                     return Err(SolcError::msg(format!(
-                        "missing solc \"{}\" installation in offline mode",
-                        version
+                        "missing solc \"{version}\" installation in offline mode"
                     )))
                 } else {
                     // install missing solc
@@ -834,10 +854,21 @@ impl Node {
     pub fn read(file: impl AsRef<Path>) -> Result<Self> {
         let file = file.as_ref();
         let source = Source::read(file).map_err(|err| {
-            if !err.path().exists() && err.path().is_symlink() {
+            let exists = err.path().exists();
+            if !exists && err.path().is_symlink() {
                 SolcError::ResolveBadSymlink(err)
             } else {
-                SolcError::Resolve(err)
+                // This is an additional check useful on OS that have case-sensitive paths, See also <https://docs.soliditylang.org/en/v0.8.17/path-resolution.html#import-callback>
+                if !exists {
+                    // check if there exists a file with different case
+                    if let Some(existing_file) = find_case_sensitive_existing_file(file) {
+                        SolcError::ResolveCaseSensitiveFileName { error: err, existing_file }
+                    } else {
+                        SolcError::Resolve(err)
+                    }
+                } else {
+                    SolcError::Resolve(err)
+                }
             }
         })?;
         let data = SolData::parse(source.as_ref(), file);
@@ -867,6 +898,38 @@ impl Node {
     pub fn unpack(&self) -> (&PathBuf, &Source) {
         (&self.path, &self.source)
     }
+
+    /// Checks that the file's version is even available.
+    ///
+    /// This returns an error if the file's version is invalid semver, or is not available such as
+    /// 0.8.20, if the highest available version is `0.8.19`
+    #[allow(dead_code)]
+    fn check_available_version(
+        &self,
+        all_versions: &[SolcVersion],
+        offline: bool,
+    ) -> Option<std::result::Result<(), SourceVersionError>> {
+        fn ensure_version(
+            v: &str,
+            all_versions: &[SolcVersion],
+            offline: bool,
+        ) -> std::result::Result<(), SourceVersionError> {
+            let req: VersionReq =
+                v.parse().map_err(|err| SourceVersionError::InvalidVersion(v.to_string(), err))?;
+
+            if !all_versions.iter().any(|v| req.matches(v.as_ref())) {
+                return if offline {
+                    Err(SourceVersionError::NoMatchingVersionOffline(req))
+                } else {
+                    Err(SourceVersionError::NoMatchingVersion(req))
+                }
+            }
+
+            Ok(())
+        }
+        let v = self.data.version.as_ref()?.data();
+        Some(ensure_version(v, all_versions, offline))
+    }
 }
 
 /// Helper type for formatting a node
@@ -884,6 +947,18 @@ impl<'a> fmt::Display for DisplayNode<'a> {
         }
         Ok(())
     }
+}
+
+/// Errors thrown when checking the solc version of a file
+#[derive(Debug, thiserror::Error)]
+#[allow(unused)]
+enum SourceVersionError {
+    #[error("Failed to parse solidity version {0}: {1}")]
+    InvalidVersion(String, semver::Error),
+    #[error("No solc version exists that matches the version requirement: {0}")]
+    NoMatchingVersion(VersionReq),
+    #[error("No solc version installed that matches the version requirement: {0}")]
+    NoMatchingVersionOffline(VersionReq),
 }
 
 #[cfg(test)]

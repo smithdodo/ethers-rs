@@ -1,24 +1,26 @@
-#![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod contract;
-pub use contract::Contract;
+#[path = "contract.rs"]
+mod _contract;
+pub use _contract::{Contract, ContractInstance};
 
 mod base;
 pub use base::{decode_function_data, encode_function_data, AbiError, BaseContract};
 
 mod call;
-pub use call::{ContractError, EthCall};
+pub use call::{ContractCall, ContractError, EthCall, FunctionCall};
 
 mod error;
-pub use error::EthError;
+pub use error::{ContractRevert, EthError};
 
 mod factory;
-pub use factory::{ContractDeployer, ContractFactory};
+pub use factory::{ContractDeployer, ContractDeploymentTx, ContractFactory, DeploymentTxFactory};
 
 mod event;
-pub use event::{EthEvent, Event};
+pub use event::{parse_log, EthEvent, Event};
 
 mod log;
 pub use log::{decode_logs, EthLogDecode, LogMeta};
@@ -31,8 +33,10 @@ mod multicall;
 #[cfg(any(test, feature = "abigen"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "abigen")))]
 pub use multicall::{
-    Multicall, MulticallContract, MulticallError, MulticallVersion, MULTICALL_ADDRESS,
-    MULTICALL_SUPPORTED_CHAIN_IDS,
+    constants::{MULTICALL_ADDRESS, MULTICALL_SUPPORTED_CHAIN_IDS},
+    contract as multicall_contract,
+    error::MulticallError,
+    Call, Multicall, MulticallContract, MulticallVersion,
 };
 
 /// This module exposes low lever builder structures which are only consumed by the
@@ -64,3 +68,25 @@ pub use once_cell::sync::Lazy;
 
 #[cfg(feature = "eip712")]
 pub use ethers_derive_eip712::*;
+
+// For macro expansions only, not public API.
+// See: [#2235](https://github.com/gakonst/ethers-rs/pull/2235)
+
+#[doc(hidden)]
+#[allow(unused_extern_crates)]
+extern crate self as ethers_contract;
+
+#[doc(hidden)]
+#[allow(unused_extern_crates)]
+extern crate self as ethers;
+
+#[doc(hidden)]
+pub mod contract {
+    pub use crate::*;
+}
+
+#[doc(hidden)]
+pub use ethers_core as core;
+
+#[doc(hidden)]
+pub use ethers_providers as providers;

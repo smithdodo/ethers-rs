@@ -8,6 +8,7 @@ use ethers_solc::{
     },
     buildinfo::BuildInfo,
     cache::{SolFilesCache, SOLIDITY_FILES_CACHE_FILENAME},
+    error::SolcError,
     info::ContractInfo,
     project_util::*,
     remappings::Remapping,
@@ -1199,6 +1200,27 @@ library MyLib {
     let bytecode = &contract.bytecode.as_ref().unwrap().object;
     assert!(!bytecode.is_unlinked());
 }
+
+#[test]
+fn can_detect_invalid_version() {
+    let tmp = TempProject::dapptools().unwrap();
+    let content = r#"
+    pragma solidity ^0.100.10;
+    contract A {}
+   "#;
+    tmp.add_source("A", content).unwrap();
+
+    let out = tmp.compile().unwrap_err();
+    match out {
+        SolcError::Message(err) => {
+            assert_eq!(err, "Encountered invalid solc version in src/A.sol: No solc version exists that matches the version requirement: ^0.100.10");
+        }
+        _ => {
+            unreachable!()
+        }
+    }
+}
+
 #[test]
 fn can_recompile_with_changes() {
     let mut tmp = TempProject::dapptools().unwrap();
@@ -1610,6 +1632,10 @@ fn can_compile_model_checker_sample() {
         engine: Some(CHC),
         targets: None,
         timeout: Some(10000),
+        show_unproved: None,
+        div_mod_with_slacks: None,
+        solvers: None,
+        invariants: None,
     });
     let compiled = project.compile().unwrap();
 
@@ -1709,10 +1735,9 @@ async fn can_install_solc_and_compile_version() {
             "Contract",
             format!(
                 r#"
-pragma solidity {};
+pragma solidity {version};
 contract Contract {{ }}
-"#,
-                version
+"#
             ),
         )
         .unwrap();
@@ -1861,7 +1886,7 @@ fn can_parse_doc() {
 
     let contract = r#"
 // SPDX-License-Identifier: GPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity 0.8.17;
 
 /// @title Not an ERC20.
 /// @author Notadev

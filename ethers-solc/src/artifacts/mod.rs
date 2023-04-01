@@ -11,6 +11,7 @@ use std::{
     fmt, fs,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 use tracing::warn;
 use yansi::Paint;
@@ -22,7 +23,10 @@ pub mod contract;
 pub mod output_selection;
 pub mod serde_helpers;
 use crate::{
-    artifacts::output_selection::{ContractOutputSelection, OutputSelection},
+    artifacts::{
+        lowfidelity::NodeType,
+        output_selection::{ContractOutputSelection, OutputSelection},
+    },
     filter::FilteredSources,
 };
 pub use bytecode::*;
@@ -102,10 +106,12 @@ impl CompilerInput {
     pub fn sanitized(mut self, version: &Version) -> Self {
         static PRE_V0_6_0: once_cell::sync::Lazy<VersionReq> =
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.6.0").unwrap());
-        static PRE_V0_8_10: once_cell::sync::Lazy<VersionReq> =
-            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.10").unwrap());
         static PRE_V0_7_5: once_cell::sync::Lazy<VersionReq> =
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.7.5").unwrap());
+        static PRE_V0_8_7: once_cell::sync::Lazy<VersionReq> =
+            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.7").unwrap());
+        static PRE_V0_8_10: once_cell::sync::Lazy<VersionReq> =
+            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.10").unwrap());
         static PRE_V0_8_18: once_cell::sync::Lazy<VersionReq> =
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.18").unwrap());
 
@@ -119,6 +125,18 @@ impl CompilerInput {
             let _ = self.settings.debug.take();
         }
 
+        if PRE_V0_7_5.matches(version) {
+            // introduced in 0.7.5 <https://github.com/ethereum/solidity/releases/tag/v0.7.5>
+            self.settings.via_ir.take();
+        }
+
+        if PRE_V0_8_7.matches(version) {
+            // lower the disable version from 0.8.10 to 0.8.7, due to `divModNoSlacks`,
+            // `showUnproved` and `solvers` are implemented
+            // introduced in <https://github.com/ethereum/solidity/releases/tag/v0.8.7>
+            self.settings.model_checker = None;
+        }
+
         if PRE_V0_8_10.matches(version) {
             if let Some(ref mut debug) = self.settings.debug {
                 // introduced in <https://docs.soliditylang.org/en/v0.8.10/using-the-compiler.html#compiler-api>
@@ -126,19 +144,23 @@ impl CompilerInput {
                 debug.debug_info.clear();
             }
 
-            // 0.8.10 is the earliest version that has all model checker options.
-            self.settings.model_checker = None;
-        }
-
-        if PRE_V0_7_5.matches(version) {
-            // introduced in 0.7.5 <https://github.com/ethereum/solidity/releases/tag/v0.7.5>
-            self.settings.via_ir.take();
+            if let Some(ref mut model_checker) = self.settings.model_checker {
+                // introduced in <https://github.com/ethereum/solidity/releases/tag/v0.8.10>
+                model_checker.invariants = None;
+            }
         }
 
         if PRE_V0_8_18.matches(version) {
             // introduced in 0.8.18 <https://github.com/ethereum/solidity/releases/tag/v0.8.18>
             if let Some(ref mut meta) = self.settings.metadata {
                 meta.cbor_metadata = None;
+            }
+
+            if let Some(ref mut model_checker) = self.settings.model_checker {
+                if let Some(ref mut solvers) = model_checker.solvers {
+                    // elf solver introduced in 0.8.18 <https://github.com/ethereum/solidity/releases/tag/v0.8.18>
+                    solvers.retain(|solver| *solver != ModelCheckerSolver::Eld);
+                }
             }
         }
 
@@ -532,8 +554,7 @@ impl Libraries {
                 .ok_or_else(|| SolcError::msg(format!("failed to parse library address: {lib}")))?;
             if items.next().is_some() {
                 return Err(SolcError::msg(format!(
-                    "failed to parse, too many arguments passed: {}",
-                    lib
+                    "failed to parse, too many arguments passed: {lib}"
                 )))
             }
             libraries
@@ -662,6 +683,23 @@ pub struct OptimizerDetails {
     pub yul_details: Option<YulDetails>,
 }
 
+// === impl OptimizerDetails ===
+
+impl OptimizerDetails {
+    /// Returns true if no settings are set.
+    pub fn is_empty(&self) -> bool {
+        self.peephole.is_none() &&
+            self.inliner.is_none() &&
+            self.jumpdest_remover.is_none() &&
+            self.order_literals.is_none() &&
+            self.deduplicate.is_none() &&
+            self.cse.is_none() &&
+            self.constant_optimizer.is_none() &&
+            self.yul.is_none() &&
+            self.yul_details.as_ref().map(|yul| yul.is_empty()).unwrap_or(true)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct YulDetails {
@@ -675,7 +713,16 @@ pub struct YulDetails {
     pub optimizer_steps: Option<String>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// === impl YulDetails ===
+
+impl YulDetails {
+    /// Returns true if no settings are set.
+    pub fn is_empty(&self) -> bool {
+        self.stack_allocation.is_none() && self.optimizer_steps.is_none()
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EvmVersion {
     Homestead,
     TangerineWhistle,
@@ -685,13 +732,8 @@ pub enum EvmVersion {
     Petersburg,
     Istanbul,
     Berlin,
+    #[default]
     London,
-}
-
-impl Default for EvmVersion {
-    fn default() -> Self {
-        Self::London
-    }
 }
 
 impl EvmVersion {
@@ -784,9 +826,10 @@ pub struct DebuggingSettings {
 }
 
 /// How to treat revert (and require) reason strings.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RevertStrings {
     /// "default" does not inject compiler-generated revert strings and keeps user-supplied ones.
+    #[default]
     Default,
     /// "strip" removes all revert strings (if possible, i.e. if literals are used) keeping
     /// side-effects
@@ -825,12 +868,6 @@ impl FromStr for RevertStrings {
     }
 }
 
-impl Default for RevertStrings {
-    fn default() -> Self {
-        RevertStrings::Default
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsMetadata {
     /// Use only literal content and not URLs (false by default)
@@ -866,17 +903,12 @@ impl From<BytecodeHash> for SettingsMetadata {
 /// Determines the hash method for the metadata hash that is appended to the bytecode.
 ///
 /// Solc's default is `Ipfs`, see <https://docs.soliditylang.org/en/latest/using-the-compiler.html#compiler-api>.
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BytecodeHash {
+    #[default]
     Ipfs,
     None,
     Bzzr1,
-}
-
-impl Default for BytecodeHash {
-    fn default() -> Self {
-        BytecodeHash::Ipfs
-    }
 }
 
 impl FromStr for BytecodeHash {
@@ -1031,11 +1063,20 @@ pub struct ModelCheckerSettings {
     pub timeout: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<ModelCheckerTarget>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invariants: Option<Vec<ModelCheckerInvariant>>,
+    #[serde(rename = "showUnproved", skip_serializing_if = "Option::is_none")]
+    pub show_unproved: Option<bool>,
+    #[serde(rename = "divModWithSlacks", skip_serializing_if = "Option::is_none")]
+    pub div_mod_with_slacks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solvers: Option<Vec<ModelCheckerSolver>>,
 }
 
 /// Which model checker engine to run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelCheckerEngine {
+    #[default]
     Default,
     All,
     BMC,
@@ -1065,12 +1106,6 @@ impl FromStr for ModelCheckerEngine {
             "chc" => Ok(ModelCheckerEngine::CHC),
             s => Err(format!("Unknown model checker engine: {s}")),
         }
-    }
-}
-
-impl Default for ModelCheckerEngine {
-    fn default() -> Self {
-        ModelCheckerEngine::Default
     }
 }
 
@@ -1118,6 +1153,72 @@ impl FromStr for ModelCheckerTarget {
             "outOfBounds" => Ok(ModelCheckerTarget::OutOfBounds),
             "balance" => Ok(ModelCheckerTarget::Balance),
             s => Err(format!("Unknown model checker target: {s}")),
+        }
+    }
+}
+
+/// Which model checker invariants to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelCheckerInvariant {
+    Contract,
+    Reentrancy,
+}
+
+impl fmt::Display for ModelCheckerInvariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerInvariant::Contract => "contract",
+            ModelCheckerInvariant::Reentrancy => "reentrancy",
+        };
+        write!(f, "{string}")
+    }
+}
+
+impl FromStr for ModelCheckerInvariant {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "contract" => Ok(ModelCheckerInvariant::Contract),
+            "reentrancy" => Ok(ModelCheckerInvariant::Reentrancy),
+            s => Err(format!("Unknown model checker invariant: {s}")),
+        }
+    }
+}
+
+/// Which model checker solvers to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelCheckerSolver {
+    Cvc4,
+    Eld,
+    Smtlib2,
+    Z3,
+}
+
+impl fmt::Display for ModelCheckerSolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerSolver::Cvc4 => "cvc4",
+            ModelCheckerSolver::Eld => "eld",
+            ModelCheckerSolver::Smtlib2 => "smtlib2",
+            ModelCheckerSolver::Z3 => "z3",
+        };
+        write!(f, "{string}")
+    }
+}
+
+impl FromStr for ModelCheckerSolver {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cvc4" => Ok(ModelCheckerSolver::Cvc4),
+            "eld" => Ok(ModelCheckerSolver::Cvc4),
+            "smtlib2" => Ok(ModelCheckerSolver::Smtlib2),
+            "z3" => Ok(ModelCheckerSolver::Z3),
+            s => Err(format!("Unknown model checker invariant: {s}")),
         }
     }
 }
@@ -1181,16 +1282,29 @@ pub struct DocLibraries {
     pub libs: BTreeMap<String, serde_json::Value>,
 }
 
+/// Content of a solidity file
+///
+/// This contains the actual source code of a file
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Source {
-    pub content: String,
+    /// Content of the file
+    ///
+    /// This is an `Arc` because it may be cloned. If the [Graph](crate::resolver::Graph) of the
+    /// project contains multiple conflicting versions then the same [Source] may be required by
+    /// conflicting versions and needs to be duplicated.
+    pub content: Arc<String>,
 }
 
 impl Source {
-    /// Reads the file content
+    /// Creates a new instance of [Source] with the given content.
+    pub fn new(content: impl Into<String>) -> Self {
+        Self { content: Arc::new(content.into()) }
+    }
+
+    /// Reads the file's content
     pub fn read(file: impl AsRef<Path>) -> Result<Self, SolcIoError> {
         let file = file.as_ref();
-        Ok(Self { content: fs::read_to_string(file).map_err(|err| SolcIoError::new(err, file))? })
+        Ok(Self::new(fs::read_to_string(file).map_err(|err| SolcIoError::new(err, file))?))
     }
 
     /// Recursively finds all source files under the given dir path and reads them all
@@ -1240,7 +1354,7 @@ impl Source {
     /// Generate a non-cryptographically secure checksum of the file's content
     pub fn content_hash(&self) -> String {
         let mut hasher = md5::Md5::new();
-        hasher.update(&self.content);
+        hasher.update(self);
         let result = hasher.finalize();
         hex::encode(result)
     }
@@ -1256,11 +1370,9 @@ impl Source {
     /// async version of `Self::read`
     pub async fn async_read(file: impl AsRef<Path>) -> Result<Self, SolcIoError> {
         let file = file.as_ref();
-        Ok(Self {
-            content: tokio::fs::read_to_string(file)
-                .await
-                .map_err(|err| SolcIoError::new(err, file))?,
-        })
+        Ok(Self::new(
+            tokio::fs::read_to_string(file).await.map_err(|err| SolcIoError::new(err, file))?,
+        ))
     }
 
     /// Finds all source files under the given dir path and reads them all
@@ -1289,6 +1401,12 @@ impl Source {
 impl AsRef<str> for Source {
     fn as_ref(&self) -> &str {
         &self.content
+    }
+}
+
+impl AsRef<[u8]> for Source {
+    fn as_ref(&self) -> &[u8] {
+        self.content.as_bytes()
     }
 }
 

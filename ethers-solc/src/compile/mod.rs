@@ -70,7 +70,7 @@ pub(crate) fn take_solc_installer_lock() -> std::sync::MutexGuard<'static, ()> {
 /// A list of upstream Solc releases, used to check which version
 /// we should download.
 /// The boolean value marks whether there was an error accessing the release list
-#[cfg(all(feature = "svm-solc"))]
+#[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
 pub static RELEASES: once_cell::sync::Lazy<(svm::Releases, Vec<Version>, bool)> =
     once_cell::sync::Lazy::new(|| {
         match serde_json::from_str::<svm::Releases>(svm_builds::RELEASE_LIST_JSON) {
@@ -240,7 +240,7 @@ impl Solc {
 
     /// Returns the list of all versions that are available to download and marking those which are
     /// already installed.
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn all_versions() -> Vec<SolcVersion> {
         let mut all_versions = Self::installed_versions();
         let mut uniques = all_versions
@@ -324,7 +324,7 @@ impl Solc {
     /// to build it, and returns it.
     ///
     /// If the required compiler version is not installed, it also proceeds to install it.
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn detect_version(source: &Source) -> Result<Version> {
         // detects the required solc version
         let sol_version = Self::source_version_req(source)?;
@@ -335,7 +335,7 @@ impl Solc {
     /// used to build it, and returns it.
     ///
     /// If the required compiler version is not installed, it also proceeds to install it.
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn ensure_installed(sol_version: &VersionReq) -> Result<Version> {
         #[cfg(any(test, feature = "tests"))]
         let _lock = take_solc_installer_lock();
@@ -400,7 +400,7 @@ impl Solc {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "svm-solc")]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub async fn install(version: &Version) -> std::result::Result<Self, svm::SolcVmError> {
         tracing::trace!("installing solc version \"{}\"", version);
         crate::report::solc_installation_start(version);
@@ -410,7 +410,7 @@ impl Solc {
     }
 
     /// Blocking version of `Self::install`
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn blocking_install(version: &Version) -> std::result::Result<Self, svm::SolcVmError> {
         use crate::utils::RuntimeOrHandle;
 
@@ -440,7 +440,7 @@ impl Solc {
 
     /// Verify that the checksum for this version of solc is correct. We check against the SHA256
     /// checksum from the build information published by [binaries.soliditylang.org](https://binaries.soliditylang.org/)
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn verify_checksum(&self) -> Result<()> {
         let version = self.version_short()?;
         let mut version_path = svm::version_path(version.to_string().as_str());
@@ -457,7 +457,7 @@ impl Solc {
 
         use sha2::Digest;
         let mut hasher = sha2::Sha256::new();
-        hasher.update(&content);
+        hasher.update(content);
         let checksum_calc = &hasher.finalize()[..];
 
         let checksum_found = &RELEASES.0.get_checksum(&version).expect("checksum not found");
@@ -572,10 +572,7 @@ impl Solc {
 #[cfg(feature = "async")]
 impl Solc {
     /// Convenience function for compiling all sources under the given path
-    pub async fn async_compile_source<T: Serialize>(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<CompilerOutput> {
+    pub async fn async_compile_source(&self, path: impl AsRef<Path>) -> Result<CompilerOutput> {
         self.async_compile(&CompilerInput::with_sources(Source::async_read_all_from(path).await?))
             .await
     }
@@ -686,9 +683,10 @@ fn version_from_output(output: Output) -> Result<Version> {
         let version = output
             .stdout
             .lines()
+            .filter_map(|l| l.ok())
+            .filter(|l| !l.trim().is_empty())
             .last()
-            .ok_or_else(|| SolcError::solc("version not found in solc output"))?
-            .map_err(|err| SolcError::msg(format!("Failed to read output: {err}")))?;
+            .ok_or_else(|| SolcError::solc("version not found in solc output"))?;
         // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
         Ok(Version::from_str(&version.trim_start_matches("Version: ").replace(".g++", ".gcc"))?)
     } else {
@@ -819,7 +817,7 @@ mod tests {
 
     #[test]
     // This test might be a bit hard to maintain
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     fn test_detect_version() {
         for (pragma, expected) in [
             // pinned
@@ -832,7 +830,7 @@ mod tests {
             // update this test whenever there's a new sol
             // version. that's ok! good reminder to check the
             // patch notes.
-            (">=0.5.0", "0.8.17"),
+            (">=0.5.0", "0.8.19"),
             // range
             (">=0.4.0 <0.5.0", "0.4.26"),
         ]
@@ -864,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "svm-solc")]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     fn can_install_solc_in_tokio_rt() {
         let version = Version::from_str("0.8.6").unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -908,6 +906,6 @@ mod tests {
     ///// helpers
 
     fn source(version: &str) -> Source {
-        Source { content: format!("pragma solidity {version};\n") }
+        Source::new(format!("pragma solidity {version};\n"))
     }
 }
