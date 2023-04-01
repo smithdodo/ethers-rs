@@ -6,6 +6,7 @@ use ethers_core::types::{
 };
 use futures_util::future::join_all;
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value;
 use std::fmt::Debug;
 use url::Url;
 
@@ -945,7 +946,7 @@ pub trait Middleware: Sync + Send + Debug {
     where
         <Self as Middleware>::Provider: PubsubClient,
     {
-        self.inner().subscribe_tx_pool_receipts().await.map_err(FromErr::from)
+        self.inner().subscribe_tx_pool_receipts().await.map_err(MiddlewareError::from_err)
     }
 
     async fn batch_get_storage_at<T: Into<NameOrAddress> + Send + Sync>(
@@ -954,14 +955,28 @@ pub trait Middleware: Sync + Send + Debug {
         location: H256,
         block: Option<BlockId>,
     ) -> Result<Bytes, Self::Error> {
-        self.inner().batch_get_storage_at(from, location, block).await.map_err(FromErr::from)
+        self.inner().batch_get_storage_at(from, location, block).await.map_err(MiddlewareError::from_err)
     }
 
     async fn call_bundle<T: Serialize + Debug + Send + Sync>(
         &self,
         bundle: T,
     ) -> Result<Value, Self::Error> {
-        self.inner().call_bundle(bundle).await.map_err(FromErr::from)
+        self.inner().call_bundle(bundle).await.map_err(MiddlewareError::from_err)
+    }
+
+    async fn send_puissant<T: Serialize + Debug + Send + Sync>(
+        &self,
+        bundle: T,
+    ) -> Result<Value, ProviderError> {
+        self.inner().send_puissant(bundle).await
+    }
+
+    async fn get_transaction_receipts_by_block_number<T: Send + Sync + Into<BlockNumber>>(
+        &self,
+        block_number: T,
+    ) -> Result<Option<Vec<TransactionReceipt>>, ProviderError> {
+        self.inner().get_transaction_receipts_by_block_number(block_number).await
     }
     //=========================================================================
 }
