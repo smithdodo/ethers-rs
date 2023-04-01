@@ -1,7 +1,7 @@
 use crate::types::Address;
 use rlp::{Decodable, Encodable, RlpStream};
 use serde::{ser::Error as SerializationError, Deserialize, Deserializer, Serialize, Serializer};
-use std::{cmp::Ordering, convert::Infallible, str::FromStr};
+use std::{cmp::Ordering, str::FromStr};
 
 /// ENS name or Ethereum Address. Not RLP encoded/serialized if it's a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,8 +59,7 @@ impl Serialize for NameOrAddress {
         match self {
             Self::Address(addr) => addr.serialize(serializer),
             Self::Name(name) => Err(SerializationError::custom(format!(
-                "cannot serialize ENS name {}, must be address",
-                name
+                "cannot serialize ENS name {name}, must be address"
             ))),
         }
     }
@@ -101,10 +100,14 @@ impl From<Address> for NameOrAddress {
 }
 
 impl FromStr for NameOrAddress {
-    type Err = Infallible;
+    type Err = <Address as FromStr>::Err;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::Name(s.to_string()))
+        if s.starts_with("0x") {
+            s.parse().map(Self::Address)
+        } else {
+            Ok(Self::Name(s.to_string()))
+        }
     }
 }
 

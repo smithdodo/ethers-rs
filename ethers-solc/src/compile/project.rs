@@ -80,11 +80,10 @@
 //! If caching is enabled in the [Project](crate::Project) a cache file will be created upon a
 //! successful solc build. The [cache file](crate::cache::SolFilesCache) stores metadata for all the
 //! files that were provided to solc.
-//! For every file the cache file contains a dedicated [cache
-//! entry](crate::cache::CacheEntry), which represents the state of the file. A solidity file can
-//! contain several contracts, for every contract a separate [artifact](crate::Artifact) is emitted.
-//! Therefor the entry also tracks all artifacts emitted by a file. A solidity file can also be
-//! compiled with several solc versions.
+//! For every file the cache file contains a dedicated [cache entry](crate::cache::CacheEntry),
+//! which represents the state of the file. A solidity file can contain several contracts, for every
+//! contract a separate [artifact](crate::Artifact) is emitted. Therefor the entry also tracks all
+//! artifacts emitted by a file. A solidity file can also be compiled with several solc versions.
 //!
 //! For example in `A(<=0.8.10) imports C(>0.4.0)` and
 //! `B(0.8.11) imports C(>0.4.0)`, both `A` and `B` import `C` but there's no solc version that's
@@ -141,7 +140,7 @@ impl<'a, T: ArtifactOutput> ProjectCompiler<'a, T> {
     /// let project = Project::builder().build().unwrap();
     /// let output = project.compile().unwrap();
     /// ```
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn new(project: &'a Project<T>) -> Result<Self> {
         Self::with_sources(project, project.paths.read_input_files()?)
     }
@@ -152,7 +151,7 @@ impl<'a, T: ArtifactOutput> ProjectCompiler<'a, T> {
     ///
     /// Multiple (`Solc` -> `Sources`) pairs can be compiled in parallel if the `Project` allows
     /// multiple `jobs`, see [`crate::Project::set_solc_jobs()`].
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn with_sources(project: &'a Project<T>, sources: Sources) -> Result<Self> {
         let graph = Graph::resolve_sources(&project.paths, sources)?;
         let (versions, edges) = graph.into_sources_by_version(project.offline)?;
@@ -252,10 +251,12 @@ impl<'a, T: ArtifactOutput> ProjectCompiler<'a, T> {
 /// The main reason is to debug all states individually
 #[derive(Debug)]
 struct PreprocessedState<'a, T: ArtifactOutput> {
-    /// contains all sources to compile
+    /// Contains all the sources to compile.
     sources: FilteredCompilerSources,
-    /// cache that holds [CacheEntry] object if caching is enabled and the project is recompiled
+
+    /// Cache that holds `CacheEntry` objects if caching is enabled and the project is recompiled
     cache: ArtifactsCache<'a, T>,
+
     sparse_output: SparseOutputFilter,
 }
 
@@ -311,7 +312,8 @@ impl<'a, T: ArtifactOutput> CompiledState<'a, T> {
                 ctx,
                 &project.paths,
             )
-        } else if output.has_error(&project.ignored_error_codes, &project.compiler_severity_filter) {
+        } else if output.has_error(&project.ignored_error_codes, &project.compiler_severity_filter)
+        {
             trace!("skip writing cache file due to solc errors: {:?}", output.errors);
             project.artifacts_handler().output_to_artifacts(
                 &output.contracts,
@@ -356,19 +358,21 @@ impl<'a, T: ArtifactOutput> ArtifactsState<'a, T> {
     ///
     /// this concludes the [`Project::compile()`] statemachine
     fn write_cache(self) -> Result<ProjectCompileOutput<T>> {
-        trace!("write cache");
         let ArtifactsState { output, cache, compiled_artifacts } = self;
         let project = cache.project();
         let ignored_error_codes = project.ignored_error_codes.clone();
         let compiler_severity_filter = project.compiler_severity_filter.clone();
-        let skip_write_to_disk = project.no_artifacts || output.has_error(&ignored_error_codes, &compiler_severity_filter);
+        let has_error = output.has_error(&ignored_error_codes, &compiler_severity_filter);
+        let skip_write_to_disk = project.no_artifacts || has_error;
+        trace!(has_error, project.no_artifacts, skip_write_to_disk, cache_path=?project.cache_path(),"prepare writing cache file");
+
         let cached_artifacts = cache.consume(&compiled_artifacts, !skip_write_to_disk)?;
         Ok(ProjectCompileOutput {
             compiler_output: output,
             compiled_artifacts,
             cached_artifacts,
             ignored_error_codes,
-            compiler_severity_filter
+            compiler_severity_filter,
         })
     }
 }

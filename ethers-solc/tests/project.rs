@@ -8,6 +8,7 @@ use ethers_solc::{
     },
     buildinfo::BuildInfo,
     cache::{SolFilesCache, SOLIDITY_FILES_CACHE_FILENAME},
+    error::SolcError,
     info::ContractInfo,
     project_util::*,
     remappings::Remapping,
@@ -1199,6 +1200,27 @@ library MyLib {
     let bytecode = &contract.bytecode.as_ref().unwrap().object;
     assert!(!bytecode.is_unlinked());
 }
+
+#[test]
+fn can_detect_invalid_version() {
+    let tmp = TempProject::dapptools().unwrap();
+    let content = r#"
+    pragma solidity ^0.100.10;
+    contract A {}
+   "#;
+    tmp.add_source("A", content).unwrap();
+
+    let out = tmp.compile().unwrap_err();
+    match out {
+        SolcError::Message(err) => {
+            assert_eq!(err, "Encountered invalid solc version in src/A.sol: No solc version exists that matches the version requirement: ^0.100.10");
+        }
+        _ => {
+            unreachable!()
+        }
+    }
+}
+
 #[test]
 fn can_recompile_with_changes() {
     let mut tmp = TempProject::dapptools().unwrap();
@@ -1610,6 +1632,10 @@ fn can_compile_model_checker_sample() {
         engine: Some(CHC),
         targets: None,
         timeout: Some(10000),
+        show_unproved: None,
+        div_mod_with_slacks: None,
+        solvers: None,
+        invariants: None,
     });
     let compiled = project.compile().unwrap();
 
@@ -1623,8 +1649,8 @@ fn test_compiler_severity_filter() {
     fn gen_test_data_warning_path() -> ProjectPathsConfig {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/test-contract-warnings");
-        let paths = ProjectPathsConfig::builder().sources(root).build().unwrap();
-        paths
+
+        ProjectPathsConfig::builder().sources(root).build().unwrap()
     }
 
     let project = Project::builder()
@@ -1652,20 +1678,20 @@ fn test_compiler_severity_filter() {
 #[test]
 fn test_compiler_severity_filter_and_ignored_error_codes() {
     fn gen_test_data_licensing_warning() -> ProjectPathsConfig {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/test-contract-warnings/LicenseWarning.sol");
-        let paths = ProjectPathsConfig::builder().sources(root).build().unwrap();
-        paths
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/test-contract-warnings/LicenseWarning.sol");
+
+        ProjectPathsConfig::builder().sources(root).build().unwrap()
     }
 
     let missing_license_error_code = 1878;
 
     let project = Project::builder()
-    .no_artifacts()
-    .paths(gen_test_data_licensing_warning())
-    .ephemeral()
-    .build()
-    .unwrap();
+        .no_artifacts()
+        .paths(gen_test_data_licensing_warning())
+        .ephemeral()
+        .build()
+        .unwrap();
     let compiled = project.compile().unwrap();
     assert!(compiled.has_compiler_warnings());
 
@@ -1681,13 +1707,13 @@ fn test_compiler_severity_filter_and_ignored_error_codes() {
     assert!(!compiled.has_compiler_errors());
 
     let project = Project::builder()
-    .no_artifacts()
-    .paths(gen_test_data_licensing_warning())
-    .ephemeral()
-    .ignore_error_code(missing_license_error_code)
-    .set_compiler_severity_filter(ethers_solc::artifacts::Severity::Warning)
-    .build()
-    .unwrap();
+        .no_artifacts()
+        .paths(gen_test_data_licensing_warning())
+        .ephemeral()
+        .ignore_error_code(missing_license_error_code)
+        .set_compiler_severity_filter(ethers_solc::artifacts::Severity::Warning)
+        .build()
+        .unwrap();
     let compiled = project.compile().unwrap();
     assert!(!compiled.has_compiler_warnings());
     assert!(!compiled.has_compiler_errors());
@@ -1709,10 +1735,9 @@ async fn can_install_solc_and_compile_version() {
             "Contract",
             format!(
                 r#"
-pragma solidity {};
+pragma solidity {version};
 contract Contract {{ }}
-"#,
-                version
+"#
             ),
         )
         .unwrap();
@@ -1861,7 +1886,7 @@ fn can_parse_doc() {
 
     let contract = r#"
 // SPDX-License-Identifier: GPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity 0.8.17;
 
 /// @title Not an ERC20.
 /// @author Notadev

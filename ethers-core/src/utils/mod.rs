@@ -10,6 +10,10 @@ mod geth;
 #[cfg(not(target_arch = "wasm32"))]
 pub use geth::{Geth, GethInstance};
 
+/// Utilities for working with a `genesis.json` and other chain config structs.
+mod genesis;
+pub use genesis::{ChainConfig, CliqueConfig, EthashConfig, Genesis, GenesisAccount};
+
 /// Utilities for launching an anvil instance
 #[cfg(not(target_arch = "wasm32"))]
 mod anvil;
@@ -23,6 +27,7 @@ mod hash;
 pub use hash::{hash_message, id, keccak256, serialize};
 
 mod units;
+use serde::{Deserialize, Deserializer};
 pub use units::Units;
 
 /// Re-export RLP
@@ -31,12 +36,21 @@ pub use rlp;
 /// Re-export hex
 pub use hex;
 
-use crate::types::{Address, Bytes, I256, U256};
-use elliptic_curve::sec1::ToEncodedPoint;
+use crate::types::{Address, Bytes, ParseI256Error, H256, I256, U256, U64};
 use ethabi::ethereum_types::FromDecStrErr;
-use k256::{ecdsa::SigningKey, PublicKey as K256PublicKey};
-use std::convert::{TryFrom, TryInto};
+use k256::ecdsa::SigningKey;
+use std::{
+    collections::HashMap,
+    convert::{TryFrom, TryInto},
+    fmt,
+    str::FromStr,
+};
 use thiserror::Error;
+
+/// I256 overflows for numbers wider than 77 units.
+const OVERFLOW_I256_UNITS: usize = 77;
+/// U256 overflows for numbers wider than 78 units.
+const OVERFLOW_U256_UNITS: usize = 78;
 
 /// Re-export of serde-json
 #[doc(hidden)]
@@ -58,6 +72,8 @@ pub enum ConversionError {
     FromDecStrError(#[from] FromDecStrErr),
     #[error("Overflow parsing string")]
     ParseOverflow,
+    #[error(transparent)]
+    ParseI256Error(#[from] ParseI256Error),
 }
 
 /// 1 Ether = 1e18 Wei == 0x0de0b6b3a7640000 Wei
@@ -75,6 +91,50 @@ pub const EIP1559_FEE_ESTIMATION_PRIORITY_FEE_TRIGGER: u64 = 100_000_000_000;
 /// The threshold max change/difference (in %) at which we will ignore the fee history values
 /// under it.
 pub const EIP1559_FEE_ESTIMATION_THRESHOLD_MAX_CHANGE: i64 = 200;
+
+/// This enum holds the numeric types that a possible to be returned by `parse_units` and
+/// that are taken by `format_units`.
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+pub enum ParseUnits {
+    U256(U256),
+    I256(I256),
+}
+
+impl From<ParseUnits> for U256 {
+    fn from(n: ParseUnits) -> Self {
+        match n {
+            ParseUnits::U256(n) => n,
+            ParseUnits::I256(n) => n.into_raw(),
+        }
+    }
+}
+
+impl fmt::Display for ParseUnits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseUnits::U256(val) => val.fmt(f),
+            ParseUnits::I256(val) => val.fmt(f),
+        }
+    }
+}
+
+macro_rules! construct_format_units_from {
+    ($( $t:ty[$convert:ident] ),*) => {
+        $(
+            impl From<$t> for ParseUnits {
+                fn from(num: $t) -> Self {
+                    Self::$convert(num.into())
+                }
+            }
+        )*
+    }
+}
+
+// Generate the From<T> code for the given numeric types below.
+construct_format_units_from! {
+    u8[U256], u16[U256], u32[U256], u64[U256], u128[U256], U256[U256], usize[U256],
+    i8[I256], i16[I256], i32[I256], i64[I256], i128[I256], I256[I256], isize[I256]
+}
 
 /// Format the output for the user which prefer to see values
 /// in ether (instead of wei)
@@ -97,22 +157,49 @@ pub fn format_ether<T: Into<U256>>(amount: T) -> U256 {
 ///
 /// let eth = format_units(U256::from_dec_str("1395633240123456789").unwrap(), "ether").unwrap();
 /// assert_eq!(eth, "1.395633240123456789");
+///
+/// let eth = format_units(i64::MIN, "gwei").unwrap();
+/// assert_eq!(eth, "-9223372036.854775808");
+///
+/// let eth = format_units(i128::MIN, 36).unwrap();
+/// assert_eq!(eth, "-170.141183460469231731687303715884105728");
 /// ```
 pub fn format_units<T, K>(amount: T, units: K) -> Result<String, ConversionError>
 where
-    T: Into<U256>,
+    T: Into<ParseUnits>,
     K: TryInto<Units, Error = ConversionError>,
 {
-    let units = units.try_into()?;
+    let units: usize = units.try_into()?.into();
     let amount = amount.into();
-    let amount_decimals = amount % U256::from(10_u128.pow(units.as_num()));
-    let amount_integer = amount / U256::from(10_u128.pow(units.as_num()));
-    Ok(format!(
-        "{}.{:0width$}",
-        amount_integer,
-        amount_decimals.as_u128(),
-        width = units.as_num() as usize
-    ))
+
+    match amount {
+        // 2**256 ~= 1.16e77
+        ParseUnits::U256(_) if units >= OVERFLOW_U256_UNITS => {
+            return Err(ConversionError::ParseOverflow)
+        }
+        // 2**255 ~= 5.79e76
+        ParseUnits::I256(_) if units >= OVERFLOW_I256_UNITS => {
+            return Err(ConversionError::ParseOverflow)
+        }
+        _ => {}
+    };
+    let exp10 = U256::exp10(units);
+
+    // `decimals` are formatted twice because U256 does not support alignment (`:0>width`).
+    match amount {
+        ParseUnits::U256(amount) => {
+            let integer = amount / exp10;
+            let decimals = (amount % exp10).to_string();
+            Ok(format!("{integer}.{decimals:0>units$}"))
+        }
+        ParseUnits::I256(amount) => {
+            let exp10 = I256::from_raw(exp10);
+            let sign = if amount.is_negative() { "-" } else { "" };
+            let integer = (amount / exp10).twos_complement();
+            let decimals = ((amount % exp10).twos_complement()).to_string();
+            Ok(format!("{sign}{integer}.{decimals:0>units$}"))
+        }
+    }
 }
 
 /// Converts the input to a U256 and converts from Ether to Wei.
@@ -125,11 +212,8 @@ where
 /// assert_eq!(eth, parse_ether(1usize).unwrap());
 /// assert_eq!(eth, parse_ether("1").unwrap());
 /// ```
-pub fn parse_ether<S>(eth: S) -> Result<U256, ConversionError>
-where
-    S: ToString,
-{
-    parse_units(eth, "ether")
+pub fn parse_ether<S: ToString>(eth: S) -> Result<U256, ConversionError> {
+    Ok(parse_units(eth, "ether")?.into())
 }
 
 /// Multiplies the provided amount with 10^{units} provided.
@@ -139,24 +223,25 @@ where
 /// let amount_in_eth = U256::from_dec_str("15230001000000000000").unwrap();
 /// let amount_in_gwei = U256::from_dec_str("15230001000").unwrap();
 /// let amount_in_wei = U256::from_dec_str("15230001000").unwrap();
-/// assert_eq!(amount_in_eth, parse_units("15.230001000000000000", "ether").unwrap());
-/// assert_eq!(amount_in_gwei, parse_units("15.230001000000000000", "gwei").unwrap());
-/// assert_eq!(amount_in_wei, parse_units("15230001000", "wei").unwrap());
+/// assert_eq!(amount_in_eth, parse_units("15.230001000000000000", "ether").unwrap().into());
+/// assert_eq!(amount_in_gwei, parse_units("15.230001000000000000", "gwei").unwrap().into());
+/// assert_eq!(amount_in_wei, parse_units("15230001000", "wei").unwrap().into());
 /// ```
 /// Example of trying to parse decimal WEI, which should fail, as WEI is the smallest
 /// ETH denominator. 1 ETH = 10^18 WEI.
 /// ```should_panic
 /// use ethers_core::{types::U256, utils::parse_units};
 /// let amount_in_wei = U256::from_dec_str("15230001000").unwrap();
-/// assert_eq!(amount_in_wei, parse_units("15.230001000000000000", "wei").unwrap());
+/// assert_eq!(amount_in_wei, parse_units("15.230001000000000000", "wei").unwrap().into());
 /// ```
-pub fn parse_units<K, S>(amount: S, units: K) -> Result<U256, ConversionError>
+pub fn parse_units<K, S>(amount: S, units: K) -> Result<ParseUnits, ConversionError>
 where
     S: ToString,
     K: TryInto<Units, Error = ConversionError> + Copy,
 {
     let exponent: u32 = units.try_into()?.as_num();
     let mut amount_str = amount.to_string().replace('_', "");
+    let negative = amount_str.chars().next().unwrap_or_default() == '-';
     let dec_len = if let Some(di) = amount_str.find('.') {
         amount_str.remove(di);
         amount_str[di..].len() as u32
@@ -167,16 +252,37 @@ where
     if dec_len > exponent {
         // Truncate the decimal part if it is longer than the exponent
         let amount_str = &amount_str[..(amount_str.len() - (dec_len - exponent) as usize)];
-        let a_uint = U256::from_dec_str(amount_str)?;
-        Ok(a_uint)
+        if negative {
+            // Edge case: We have removed the entire number and only the negative sign is left.
+            //            Return 0 as a I256 given the input was signed.
+            if amount_str == "-" {
+                Ok(ParseUnits::I256(I256::zero()))
+            } else {
+                Ok(ParseUnits::I256(I256::from_dec_str(amount_str)?))
+            }
+        } else {
+            Ok(ParseUnits::U256(U256::from_dec_str(amount_str)?))
+        }
+    } else if negative {
+        // Edge case: Only a negative sign was given, return 0 as a I256 given the input was signed.
+        if amount_str == "-" {
+            Ok(ParseUnits::I256(I256::zero()))
+        } else {
+            let mut n = I256::from_dec_str(&amount_str)?;
+            n *= I256::from(10)
+                .checked_pow(exponent - dec_len)
+                .ok_or(ConversionError::ParseOverflow)?;
+            Ok(ParseUnits::I256(n))
+        }
     } else {
         let mut a_uint = U256::from_dec_str(&amount_str)?;
         a_uint *= U256::from(10)
             .checked_pow(U256::from(exponent - dec_len))
             .ok_or(ConversionError::ParseOverflow)?;
-        Ok(a_uint)
+        Ok(ParseUnits::U256(a_uint))
     }
 }
+
 /// The address for an Ethereum contract is deterministically computed from the
 /// address of its creator (sender) and how many transactions the creator has
 /// sent (nonce). The sender and nonce are RLP encoded and then hashed with Keccak-256.
@@ -199,10 +305,11 @@ pub fn get_contract_address(sender: impl Into<Address>, nonce: impl Into<U256>) 
 /// keccak256( 0xff ++ senderAddress ++ salt ++ keccak256(init_code))[12..]
 pub fn get_create2_address(
     from: impl Into<Address>,
-    salt: impl Into<Bytes>,
-    init_code: impl Into<Bytes>,
+    salt: impl AsRef<[u8]>,
+    init_code: impl AsRef<[u8]>,
 ) -> Address {
-    get_create2_address_from_hash(from, salt, keccak256(init_code.into().as_ref()).to_vec())
+    let init_code_hash = keccak256(init_code.as_ref());
+    get_create2_address_from_hash(from, salt, init_code_hash)
 }
 
 /// Returns the CREATE2 address of a smart contract as specified in
@@ -223,9 +330,7 @@ pub fn get_create2_address(
 ///     utils::{get_create2_address_from_hash, keccak256},
 /// };
 ///
-/// let UNISWAP_V3_POOL_INIT_CODE_HASH = Bytes::from(
-///     hex::decode("e34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54").unwrap(),
-/// );
+/// let init_code_hash = hex::decode("e34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54").unwrap();
 /// let factory: Address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 ///     .parse()
 ///     .unwrap();
@@ -235,19 +340,18 @@ pub fn get_create2_address(
 /// let token1: Address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 ///     .parse()
 ///     .unwrap();
-/// let fee = 500;
+/// let fee = U256::from(500_u64);
 ///
 /// // abi.encode(token0 as address, token1 as address, fee as uint256)
-/// let input = abi::encode(&vec![
+/// let input = abi::encode(&[
 ///     Token::Address(token0),
 ///     Token::Address(token1),
-///     Token::Uint(U256::from(fee)),
+///     Token::Uint(fee),
 /// ]);
 ///
 /// // keccak256(abi.encode(token0, token1, fee))
 /// let salt = keccak256(&input);
-/// let pool_address =
-///     get_create2_address_from_hash(factory, salt.to_vec(), UNISWAP_V3_POOL_INIT_CODE_HASH);
+/// let pool_address = get_create2_address_from_hash(factory, salt, init_code_hash);
 ///
 /// assert_eq!(
 ///     pool_address,
@@ -258,12 +362,18 @@ pub fn get_create2_address(
 /// ```
 pub fn get_create2_address_from_hash(
     from: impl Into<Address>,
-    salt: impl Into<Bytes>,
-    init_code_hash: impl Into<Bytes>,
+    salt: impl AsRef<[u8]>,
+    init_code_hash: impl AsRef<[u8]>,
 ) -> Address {
-    let bytes =
-        [&[0xff], from.into().as_bytes(), salt.into().as_ref(), init_code_hash.into().as_ref()]
-            .concat();
+    let from = from.into();
+    let salt = salt.as_ref();
+    let init_code_hash = init_code_hash.as_ref();
+
+    let mut bytes = Vec::with_capacity(1 + 20 + salt.len() + init_code_hash.len());
+    bytes.push(0xff);
+    bytes.extend_from_slice(from.as_bytes());
+    bytes.extend_from_slice(salt);
+    bytes.extend_from_slice(init_code_hash);
 
     let hash = keccak256(bytes);
 
@@ -274,16 +384,25 @@ pub fn get_create2_address_from_hash(
 
 /// Converts a K256 SigningKey to an Ethereum Address
 pub fn secret_key_to_address(secret_key: &SigningKey) -> Address {
-    let public_key = K256PublicKey::from(&secret_key.verifying_key());
+    let public_key = secret_key.verifying_key();
     let public_key = public_key.to_encoded_point(/* compress = */ false);
     let public_key = public_key.as_bytes();
     debug_assert_eq!(public_key[0], 0x04);
     let hash = keccak256(&public_key[1..]);
-    Address::from_slice(&hash[12..])
+
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&hash[12..]);
+    Address::from(bytes)
 }
 
-/// Converts an Ethereum address to the checksum encoding
-/// Ref: <https://github.com/ethereum/EIPs/blob/master/EIPS/eip-55.md>
+/// Encodes an Ethereum address to its [EIP-55] checksum.
+///
+/// You can optionally specify an [EIP-155 chain ID] to encode the address using the [EIP-1191]
+/// extension.
+///
+/// [EIP-55]: https://eips.ethereum.org/EIPS/eip-55
+/// [EIP-155 chain ID]: https://eips.ethereum.org/EIPS/eip-155
+/// [EIP-1191]: https://eips.ethereum.org/EIPS/eip-1191
 pub fn to_checksum(addr: &Address, chain_id: Option<u8>) -> String {
     let prefixed_addr = match chain_id {
         Some(chain_id) => format!("{chain_id}0x{addr:x}"),
@@ -349,6 +468,103 @@ pub fn eip1559_default_estimator(base_fee_per_gas: U256, rewards: Vec<Vec<U256>>
     (max_fee_per_gas, max_priority_fee_per_gas)
 }
 
+/// Converts a Bytes value into a H256, accepting inputs that are less than 32 bytes long. These
+/// inputs will be left padded with zeros.
+pub fn from_bytes_to_h256<'de, D>(bytes: Bytes) -> Result<H256, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if bytes.0.len() > 32 {
+        return Err(serde::de::Error::custom("input too long to be a H256"))
+    }
+
+    // left pad with zeros to 32 bytes
+    let mut padded = [0u8; 32];
+    padded[32 - bytes.0.len()..].copy_from_slice(&bytes.0);
+
+    // then convert to H256 without a panic
+    Ok(H256::from_slice(&padded))
+}
+
+/// Deserializes the input into an Option<HashMap<H256, H256>>, using from_unformatted_hex to
+/// deserialize the keys and values.
+pub fn from_unformatted_hex_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<H256, H256>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map = Option::<HashMap<Bytes, Bytes>>::deserialize(deserializer)?;
+    match map {
+        Some(mut map) => {
+            let mut res_map = HashMap::new();
+            for (k, v) in map.drain() {
+                let k_deserialized = from_bytes_to_h256::<'de, D>(k)?;
+                let v_deserialized = from_bytes_to_h256::<'de, D>(v)?;
+                res_map.insert(k_deserialized, v_deserialized);
+            }
+            Ok(Some(res_map))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Deserializes the input into a U256, accepting both 0x-prefixed hex and decimal strings with
+/// arbitrary precision, defined by serde_json's [`Number`](serde_json::Number).
+pub fn from_int_or_hex<'de, D>(deserializer: D) -> Result<U256, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrHex {
+        Int(serde_json::Number),
+        Hex(String),
+    }
+
+    match IntOrHex::deserialize(deserializer)? {
+        IntOrHex::Hex(s) => U256::from_str(s.as_str()).map_err(serde::de::Error::custom),
+        IntOrHex::Int(n) => U256::from_dec_str(&n.to_string()).map_err(serde::de::Error::custom),
+    }
+}
+
+/// Deserializes the input into a U64, accepting both 0x-prefixed hex and decimal strings with
+/// arbitrary precision, defined by serde_json's [`Number`](serde_json::Number).
+pub fn from_u64_or_hex<'de, D>(deserializer: D) -> Result<U64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrHex {
+        Int(serde_json::Number),
+        Hex(String),
+    }
+
+    match IntOrHex::deserialize(deserializer)? {
+        IntOrHex::Hex(s) => U64::from_str(s.as_str()).map_err(serde::de::Error::custom),
+        IntOrHex::Int(n) => U64::from_dec_str(&n.to_string()).map_err(serde::de::Error::custom),
+    }
+}
+
+/// Deserializes the input into an `Option<U256>`, using [`from_int_or_hex`] to deserialize the
+/// inner value.
+pub fn from_int_or_hex_opt<'de, D>(deserializer: D) -> Result<Option<U256>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(from_int_or_hex(deserializer)?))
+}
+
+/// Deserializes the input into an `Option<u64>`, using [`from_u64_or_hex`] to deserialize the
+/// inner value.
+pub fn from_u64_or_hex_opt<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(from_u64_or_hex(deserializer)?.as_u64()))
+}
+
 fn estimate_priority_fee(rewards: Vec<Vec<U256>>) -> U256 {
     let mut rewards: Vec<U256> =
         rewards.iter().map(|r| r[0]).filter(|r| *r > U256::zero()).collect();
@@ -372,7 +588,7 @@ fn estimate_priority_fee(rewards: Vec<Vec<U256>>) -> U256 {
         .map(|(a, b)| {
             let a = I256::try_from(*a).expect("priority fee overflow");
             let b = I256::try_from(*b).expect("priority fee overflow");
-            ((b - a) * 100.into()) / a
+            ((b - a) * 100) / a
         })
         .collect();
     percentage_change.pop();
@@ -407,18 +623,24 @@ fn base_fee_surged(base_fee_per_gas: U256) -> U256 {
     }
 }
 
-/// A bit of hack to find an unused TCP port.
+/// A bit of hack to find unused TCP ports.
 ///
 /// Does not guarantee that the given port is unused after the function exists, just that it was
 /// unused before the function started (i.e., it does not reserve a port).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn unused_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to create TCP listener to find unused port");
+pub(crate) fn unused_ports<const N: usize>() -> [u16; N] {
+    use std::net::{SocketAddr, TcpListener};
 
-    let local_addr =
-        listener.local_addr().expect("Failed to read TCP listener local_addr to find unused port");
-    local_addr.port()
+    std::array::from_fn(|_| {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        TcpListener::bind(addr).expect("Failed to create TCP listener to find unused port")
+    })
+    .map(|listener| {
+        listener
+            .local_addr()
+            .expect("Failed to read TCP listener local_addr to find unused port")
+            .port()
+    })
 }
 
 #[cfg(test)]
@@ -432,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_units() {
+    fn test_format_units_unsigned() {
         let gwei_in_ether = format_units(WEI_IN_ETHER, 9).unwrap();
         assert_eq!(gwei_in_ether.parse::<f64>().unwrap() as u64, 1e9 as u64);
 
@@ -453,51 +675,191 @@ mod tests {
         let eth =
             format_units(U256::from_dec_str("1005633240123456789").unwrap(), "ether").unwrap();
         assert_eq!(eth, "1.005633240123456789");
+
+        let eth = format_units(u8::MAX, 4).unwrap();
+        assert_eq!(eth, "0.0255");
+
+        let eth = format_units(u16::MAX, "ether").unwrap();
+        assert_eq!(eth, "0.000000000000065535");
+
+        // Note: This covers usize on 32 bit systems.
+        let eth = format_units(u32::MAX, 18).unwrap();
+        assert_eq!(eth, "0.000000004294967295");
+
+        // Note: This covers usize on 64 bit systems.
+        let eth = format_units(u64::MAX, "gwei").unwrap();
+        assert_eq!(eth, "18446744073.709551615");
+
+        let eth = format_units(u128::MAX, 36).unwrap();
+        assert_eq!(eth, "340.282366920938463463374607431768211455");
+
+        let eth = format_units(U256::MAX, 77).unwrap();
+        assert_eq!(
+            eth,
+            "1.15792089237316195423570985008687907853269984665640564039457584007913129639935"
+        );
+
+        let err = format_units(U256::MAX, 78).unwrap_err();
+        assert!(matches!(err, ConversionError::ParseOverflow));
+    }
+
+    #[test]
+    fn test_format_units_signed() {
+        let eth =
+            format_units(I256::from_dec_str("-1395633240123456000").unwrap(), "ether").unwrap();
+        assert_eq!(eth.parse::<f64>().unwrap(), -1.395633240123456);
+
+        let eth =
+            format_units(I256::from_dec_str("-1395633240123456789").unwrap(), "ether").unwrap();
+        assert_eq!(eth, "-1.395633240123456789");
+
+        let eth =
+            format_units(I256::from_dec_str("1005633240123456789").unwrap(), "ether").unwrap();
+        assert_eq!(eth, "1.005633240123456789");
+
+        let eth = format_units(i8::MIN, 4).unwrap();
+        assert_eq!(eth, "-0.0128");
+        assert_eq!(eth.parse::<f64>().unwrap(), -0.0128_f64);
+
+        let eth = format_units(i8::MAX, 4).unwrap();
+        assert_eq!(eth, "0.0127");
+        assert_eq!(eth.parse::<f64>().unwrap(), 0.0127);
+
+        let eth = format_units(i16::MIN, "ether").unwrap();
+        assert_eq!(eth, "-0.000000000000032768");
+
+        // Note: This covers isize on 32 bit systems.
+        let eth = format_units(i32::MIN, 18).unwrap();
+        assert_eq!(eth, "-0.000000002147483648");
+
+        // Note: This covers isize on 64 bit systems.
+        let eth = format_units(i64::MIN, "gwei").unwrap();
+        assert_eq!(eth, "-9223372036.854775808");
+
+        let eth = format_units(i128::MIN, 36).unwrap();
+        assert_eq!(eth, "-170.141183460469231731687303715884105728");
+
+        let eth = format_units(I256::MIN, 76).unwrap();
+        assert_eq!(
+            eth,
+            "-5.7896044618658097711785492504343953926634992332820282019728792003956564819968"
+        );
+
+        let err = format_units(I256::MIN, 77).unwrap_err();
+        assert!(matches!(err, ConversionError::ParseOverflow));
     }
 
     #[test]
     fn parse_large_units() {
         let decimals = 27u32;
         let val = "10.55";
-        let unit = parse_units(val, decimals).unwrap();
-        assert_eq!(unit.to_string(), "10550000000000000000000000000");
+
+        let n: U256 = parse_units(val, decimals).unwrap().into();
+        assert_eq!(n.to_string(), "10550000000000000000000000000");
     }
 
     #[test]
     fn test_parse_units() {
-        let gwei = parse_units(1.5, 9).unwrap();
+        let gwei: U256 = parse_units(1.5, 9).unwrap().into();
         assert_eq!(gwei.as_u64(), 15e8 as u64);
 
-        let token = parse_units(1163.56926418, 8).unwrap();
+        let token: U256 = parse_units(1163.56926418, 8).unwrap().into();
         assert_eq!(token.as_u64(), 116356926418);
 
-        let eth_dec_float = parse_units(1.39563324, "ether").unwrap();
+        let eth_dec_float: U256 = parse_units(1.39563324, "ether").unwrap().into();
         assert_eq!(eth_dec_float, U256::from_dec_str("1395633240000000000").unwrap());
 
-        let eth_dec_string = parse_units("1.39563324", "ether").unwrap();
+        let eth_dec_string: U256 = parse_units("1.39563324", "ether").unwrap().into();
         assert_eq!(eth_dec_string, U256::from_dec_str("1395633240000000000").unwrap());
 
-        let eth = parse_units(1, "ether").unwrap();
+        let eth: U256 = parse_units(1, "ether").unwrap().into();
         assert_eq!(eth, WEI_IN_ETHER);
 
-        let val = parse_units("2.3", "ether").unwrap();
+        let val: U256 = parse_units("2.3", "ether").unwrap().into();
         assert_eq!(val, U256::from_dec_str("2300000000000000000").unwrap());
 
-        assert_eq!(parse_units(".2", 2).unwrap(), U256::from(20), "leading dot");
-        assert_eq!(parse_units("333.21", 2).unwrap(), U256::from(33321), "trailing dot");
-        assert_eq!(
-            parse_units("98766", 16).unwrap(),
-            U256::from_dec_str("987660000000000000000").unwrap(),
-            "no dot"
-        );
-        assert_eq!(parse_units("3_3_0", 3).unwrap(), U256::from(330000), "underscore");
-        assert_eq!(parse_units("330", 0).unwrap(), U256::from(330), "zero decimals");
-        assert_eq!(parse_units(".1234", 3).unwrap(), U256::from(123), "truncate too many decimals");
-        assert_eq!(parse_units("1", 80).is_err(), true, "overflow");
-        assert_eq!(parse_units("1", -1).is_err(), true, "neg units");
+        let n: U256 = parse_units(".2", 2).unwrap().into();
+        assert_eq!(n, U256::from(20), "leading dot");
+
+        let n: U256 = parse_units("333.21", 2).unwrap().into();
+        assert_eq!(n, U256::from(33321), "trailing dot");
+
+        let n: U256 = parse_units("98766", 16).unwrap().into();
+        assert_eq!(n, U256::from_dec_str("987660000000000000000").unwrap(), "no dot");
+
+        let n: U256 = parse_units("3_3_0", 3).unwrap().into();
+        assert_eq!(n, U256::from(330000), "underscore");
+
+        let n: U256 = parse_units("330", 0).unwrap().into();
+        assert_eq!(n, U256::from(330), "zero decimals");
+
+        let n: U256 = parse_units(".1234", 3).unwrap().into();
+        assert_eq!(n, U256::from(123), "truncate too many decimals");
+
+        assert!(parse_units("1", 80).is_err(), "overflow");
+        assert!(parse_units("1", -1).is_err(), "neg units");
+
         let two_e30 = U256::from(2) * U256([0x4674edea40000000, 0xc9f2c9cd0, 0x0, 0x0]);
-        assert_eq!(parse_units("2", 30).unwrap(), two_e30, "2e30");
-        assert_eq!(parse_units(".33_319_2", 0).unwrap(), U256::zero(), "mix");
+        let n: U256 = parse_units("2", 30).unwrap().into();
+        assert_eq!(n, two_e30, "2e30");
+
+        let n: U256 = parse_units(".33_319_2", 0).unwrap().into();
+        assert_eq!(n, U256::zero(), "mix");
+
+        let n: U256 = parse_units("", 3).unwrap().into();
+        assert_eq!(n, U256::zero(), "empty");
+    }
+
+    #[test]
+    fn test_signed_parse_units() {
+        let gwei: I256 = parse_units(-1.5, 9).unwrap().into();
+        assert_eq!(gwei.as_i64(), -15e8 as i64);
+
+        let token: I256 = parse_units(-1163.56926418, 8).unwrap().into();
+        assert_eq!(token.as_i64(), -116356926418);
+
+        let eth_dec_float: I256 = parse_units(-1.39563324, "ether").unwrap().into();
+        assert_eq!(eth_dec_float, I256::from_dec_str("-1395633240000000000").unwrap());
+
+        let eth_dec_string: I256 = parse_units("-1.39563324", "ether").unwrap().into();
+        assert_eq!(eth_dec_string, I256::from_dec_str("-1395633240000000000").unwrap());
+
+        let eth: I256 = parse_units(-1, "ether").unwrap().into();
+        assert_eq!(eth, I256::from_raw(WEI_IN_ETHER) * I256::minus_one());
+
+        let val: I256 = parse_units("-2.3", "ether").unwrap().into();
+        assert_eq!(val, I256::from_dec_str("-2300000000000000000").unwrap());
+
+        let n: I256 = parse_units("-.2", 2).unwrap().into();
+        assert_eq!(n, I256::from(-20), "leading dot");
+
+        let n: I256 = parse_units("-333.21", 2).unwrap().into();
+        assert_eq!(n, I256::from(-33321), "trailing dot");
+
+        let n: I256 = parse_units("-98766", 16).unwrap().into();
+        assert_eq!(n, I256::from_dec_str("-987660000000000000000").unwrap(), "no dot");
+
+        let n: I256 = parse_units("-3_3_0", 3).unwrap().into();
+        assert_eq!(n, I256::from(-330000), "underscore");
+
+        let n: I256 = parse_units("-330", 0).unwrap().into();
+        assert_eq!(n, I256::from(-330), "zero decimals");
+
+        let n: I256 = parse_units("-.1234", 3).unwrap().into();
+        assert_eq!(n, I256::from(-123), "truncate too many decimals");
+
+        assert!(parse_units("-1", 80).is_err(), "overflow");
+
+        let two_e30 =
+            I256::from(-2) * I256::from_raw(U256([0x4674edea40000000, 0xc9f2c9cd0, 0x0, 0x0]));
+        let n: I256 = parse_units("-2", 30).unwrap().into();
+        assert_eq!(n, two_e30, "-2e30");
+
+        let n: I256 = parse_units("-.33_319_2", 0).unwrap().into();
+        assert_eq!(n, I256::zero(), "mix");
+
+        let n: I256 = parse_units("-", 3).unwrap().into();
+        assert_eq!(n, I256::zero(), "empty");
     }
 
     #[test]

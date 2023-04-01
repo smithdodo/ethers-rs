@@ -659,6 +659,7 @@ pub trait ArtifactOutput {
         if let Ok(stripped) = rel_candidate.strip_prefix(artifacts_folder) {
             rel_candidate = stripped.to_path_buf();
         }
+        #[allow(clippy::redundant_clone)] // false positive
         let mut candidate = rel_candidate.clone();
         let contract_file = contract_file.as_ref();
         let mut current_parent = contract_file.parent();
@@ -1082,6 +1083,7 @@ impl ArtifactOutput for MinimalCombinedArtifactsHardhatFallback {
 }
 
 #[cfg(test)]
+#[allow(clippy::extra_unused_type_parameters)]
 mod tests {
     use super::*;
 

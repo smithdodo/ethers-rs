@@ -1,11 +1,7 @@
-use std::{collections::HashMap, str::FromStr};
-
-use serde::{de, Deserialize};
-use serde_aux::prelude::*;
-
-use ethers_core::types::U256;
-
 use crate::{Client, EtherscanError, Response, Result};
+use ethers_core::types::U256;
+use serde::{de, Deserialize, Deserializer};
+use std::{collections::HashMap, str::FromStr};
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "PascalCase")]
@@ -24,6 +20,25 @@ pub struct GasOracle {
     #[serde(deserialize_with = "deserialize_f64_vec")]
     #[serde(rename = "gasUsedRatio")]
     pub gas_used_ratio: Vec<f64>,
+}
+
+fn deserialize_number_from_string<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr + serde::Deserialize<'de>,
+    <T as FromStr>::Err: std::fmt::Display,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrInt<T> {
+        String(String),
+        Number(T),
+    }
+
+    match StringOrInt::<T>::deserialize(deserializer)? {
+        StringOrInt::String(s) => s.parse::<T>().map_err(serde::de::Error::custom),
+        StringOrInt::Number(i) => Ok(i),
+    }
 }
 
 fn deserialize_f64_vec<'de, D>(deserializer: D) -> core::result::Result<Vec<f64>, D::Error>
@@ -65,62 +80,5 @@ impl Client {
         let response: Response<GasOracle> = self.get_json(&query).await?;
 
         Ok(response.result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::run_at_least_duration;
-    use ethers_core::types::Chain;
-    use serial_test::serial;
-    use std::time::Duration;
-
-    #[tokio::test]
-    #[serial]
-    async fn gas_estimate_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let result = client.gas_estimate(2000000000u32.into()).await;
-
-            result.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn gas_estimate_error() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let err = client.gas_estimate(7123189371829732819379218u128.into()).await.unwrap_err();
-
-            assert!(matches!(err, EtherscanError::GasEstimationFailed));
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn gas_oracle_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let result = client.gas_oracle().await;
-
-            assert!(result.is_ok());
-
-            let oracle = result.unwrap();
-
-            assert!(oracle.safe_gas_price > 0);
-            assert!(oracle.propose_gas_price > 0);
-            assert!(oracle.fast_gas_price > 0);
-            assert!(oracle.last_block > 0);
-            assert!(oracle.suggested_base_fee > 0.0);
-            assert!(!oracle.gas_used_ratio.is_empty());
-        })
-        .await
     }
 }

@@ -1,12 +1,12 @@
-//! Implementation of procedural macro for generating type-safe bindings to an
-//! ethereum smart contract.
+//! Procedural macros for generating type-safe bindings to an Ethereum smart contract.
+
 #![deny(missing_docs, unsafe_code, unused_crate_dependencies)]
 #![deny(rustdoc::broken_intra_doc_links)]
-
-use proc_macro::TokenStream;
-use syn::{parse_macro_input, DeriveInput};
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use abigen::Contracts;
+use proc_macro::TokenStream;
+use syn::{parse_macro_input, DeriveInput};
 
 pub(crate) mod abi_ty;
 mod abigen;
@@ -19,18 +19,42 @@ mod event;
 mod spanned;
 pub(crate) mod utils;
 
-/// Proc macro to generate type-safe bindings to a contract(s). This macro
-/// accepts one or more Ethereum contract ABI or a path. Note that relative paths are
-/// rooted in the crate's root `CARGO_MANIFEST_DIR`.
-/// Environment variable interpolation is supported via `$` prefix, like
-/// `"$CARGO_MANIFEST_DIR/contracts/c.json"`
+/// Generates type-safe bindings to an Ethereum smart contract from its ABI.
+///
+/// All the accepted ABI sources are listed in the examples below and in [Source].
+///
+/// Note:
+/// - relative paths are rooted in the crate's root (`CARGO_MANIFEST_DIR`).
+/// - Environment variable interpolation is supported via `$` prefix, like
+///   `"$CARGO_MANIFEST_DIR/contracts/c.json"`
+/// - Etherscan rate-limits requests to their API. To avoid this, set the `ETHERSCAN_API_KEY`
+///   environment variable.
+///
+/// Additionally, this macro accepts additional parameters to configure some aspects of the code
+/// generation:
+/// - `methods`: A list of mappings from method signatures to method names allowing methods names to
+///   be explicitely set for contract methods. This also provides a workaround for generating code
+///   for contracts with multiple methods with the same name.
+/// - `derives`: A list of additional derive macros that are added to all the generated structs and
+///   enums, after the default ones which are ([when applicable][tuple_derive_ref]):
+///   * [PartialEq]
+///   * [Eq]
+///   * [Debug]
+///   * [Default]
+///   * [Hash]
+///
+/// [Source]: ethers_contract_abigen::Source
+/// [tuple_derive_ref]: https://doc.rust-lang.org/stable/std/primitive.tuple.html#trait-implementations-1
 ///
 /// # Examples
 ///
+/// All the possible ABI sources:
+///
 /// ```ignore
-/// # use ethers_contract_derive::abigen;
+/// use ethers_contract_derive::abigen;
+///
 /// // ABI Path
-/// abigen!(MyContract, "MyContract.json");
+/// abigen!(MyContract, "./MyContractABI.json");
 ///
 /// // HTTP(S) source
 /// abigen!(MyContract, "https://my.domain.local/path/to/contract.json");
@@ -41,21 +65,16 @@ pub(crate) mod utils;
 ///
 /// // npmjs
 /// abigen!(MyContract, "npm:@org/package@1.0.0/path/to/contract.json");
+///
+/// // Human readable ABI
+/// abigen!(MyContract, r"[
+///     function setValue(string)
+///     function getValue() external view returns (string)
+///     event ValueChanged(address indexed author, string oldValue, string newValue)
+/// ]");
 /// ```
 ///
-/// Note that Etherscan rate-limits requests to their API, to avoid this an
-/// `ETHERSCAN_API_KEY` environment variable can be set. If it is, it will use
-/// that API key when retrieving the contract ABI.
-///
-/// Currently, the proc macro accepts additional parameters to configure some
-/// aspects of the code generation. Specifically it accepts:
-/// - `methods`: A list of mappings from method signatures to method names allowing methods names to
-///   be explicitely set for contract methods. This also provides a workaround for generating code
-///   for contracts with multiple methods with the same name.
-/// - `event_derives`: A list of additional derives that should be added to contract event structs
-///   and enums.
-///
-/// # Example
+/// Specify additional parameters:
 ///
 /// ```ignore
 /// abigen!(
@@ -64,7 +83,7 @@ pub(crate) mod utils;
 ///     methods {
 ///         myMethod(uint256,bool) as my_renamed_method;
 ///     },
-///     event_derives (serde::Deserialize, serde::Serialize),
+///     derives(serde::Deserialize, serde::Serialize),
 /// );
 /// ```
 ///
@@ -76,7 +95,6 @@ pub(crate) mod utils;
 /// `abigen!` bundles all type duplicates so that all rust contracts also use
 /// the same rust types.
 ///
-/// # Example Multiple contracts
 /// ```ignore
 /// abigen!(
 ///     MyContract,
@@ -84,18 +102,21 @@ pub(crate) mod utils;
 ///     methods {
 ///         myMethod(uint256,bool) as my_renamed_method;
 ///     },
-///     event_derives (serde::Deserialize, serde::Serialize);
+///     derives(serde::Deserialize, serde::Serialize);
 ///
 ///     MyOtherContract,
 ///     "path/to/MyOtherContract.json",
-///     event_derives (serde::Deserialize, serde::Serialize);
+///     derives(serde::Deserialize, serde::Serialize);
 /// );
 /// ```
 #[proc_macro]
 pub fn abigen(input: TokenStream) -> TokenStream {
     let contracts = parse_macro_input!(input as Contracts);
-
-    contracts.expand().unwrap_or_else(|err| err.to_compile_error()).into()
+    match contracts.expand() {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
 }
 
 /// Derives the `AbiType` and all `Tokenizable` traits for the labeled type.
@@ -105,7 +126,11 @@ pub fn abigen(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EthAbiType)]
 pub fn derive_abi_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    TokenStream::from(abi_ty::derive_tokenizeable_impl(&input))
+    match abi_ty::derive_tokenizeable_impl(&input) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
 }
 
 /// Derives the `AbiEncode`, `AbiDecode` and traits for the labeled type.
@@ -115,6 +140,10 @@ pub fn derive_abi_type(input: TokenStream) -> TokenStream {
 /// The reason why this is a separate macro is the `AbiEncode` / `AbiDecode` are `ethers`
 /// generalized codec traits used for types, calls, etc. However, encoding/decoding a call differs
 /// from the basic encoding/decoding, (`[selector + encode(self)]`)
+///
+/// Note that this macro requires the `EthAbiType` macro to be derived or for the type to implement
+/// `AbiType` and `Tokenizable`. The type returned by the `AbiType` implementation must be a
+/// `Token::Tuple`, otherwise this macro's implementation of `AbiDecode` will panic at runtime.
 ///
 /// # Example
 ///
@@ -135,7 +164,7 @@ pub fn derive_abi_type(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EthAbiCodec)]
 pub fn derive_abi_codec(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    TokenStream::from(codec::derive_codec_impl(&input))
+    codec::derive_codec_impl(&input).into()
 }
 
 /// Derives `fmt::Display` trait and generates a convenient format for all the
@@ -167,9 +196,10 @@ pub fn derive_abi_codec(input: TokenStream) -> TokenStream {
 pub fn derive_eth_display(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match display::derive_eth_display_impl(input) {
-        Ok(tokens) => TokenStream::from(tokens),
-        Err(err) => err.to_compile_error().into(),
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
     }
+    .into()
 }
 
 /// Derives the `EthEvent` and `Tokenizeable` trait for the labeled type.
@@ -217,7 +247,11 @@ pub fn derive_eth_display(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EthEvent, attributes(ethevent))]
 pub fn derive_abi_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    TokenStream::from(event::derive_eth_event_impl(input))
+    match event::derive_eth_event_impl(input) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
 }
 
 /// Derives the `EthCall` and `Tokenizeable` trait for the labeled type.
@@ -281,7 +315,11 @@ pub fn derive_abi_event(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EthCall, attributes(ethcall))]
 pub fn derive_abi_call(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    TokenStream::from(call::derive_eth_call_impl(input))
+    match call::derive_eth_call_impl(input) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
 }
 
 /// Derives the `EthError` and `Tokenizeable` trait for the labeled type.
@@ -318,5 +356,9 @@ pub fn derive_abi_call(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(EthError, attributes(etherror))]
 pub fn derive_abi_error(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    TokenStream::from(error::derive_eth_error_impl(input))
+    match error::derive_eth_error_impl(input) {
+        Ok(tokens) => tokens,
+        Err(err) => err.to_compile_error(),
+    }
+    .into()
 }

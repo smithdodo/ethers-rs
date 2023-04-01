@@ -1,7 +1,8 @@
 use crate::{
     types::{Address, Chain},
-    utils::{secret_key_to_address, unused_port},
+    utils::{secret_key_to_address, unused_ports},
 };
+use generic_array::GenericArray;
 use k256::{ecdsa::SigningKey, SecretKey as K256SecretKey};
 use std::{
     io::{BufRead, BufReader},
@@ -161,7 +162,7 @@ impl Anvil {
         self
     }
 
-    /// Sets the block-time which will be used when the `anvil` instance is launched.
+    /// Sets the block-time in seconds which will be used when the `anvil` instance is launched.
     #[must_use]
     pub fn block_time<T: Into<u64>>(mut self, block_time: T) -> Self {
         self.block_time = Some(block_time.into());
@@ -223,7 +224,7 @@ impl Anvil {
             Command::new("anvil")
         };
         cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
-        let port = if let Some(port) = self.port { port } else { unused_port() };
+        let port = if let Some(port) = self.port { port } else { unused_ports::<1>()[0] };
         cmd.arg("-p").arg(port.to_string());
 
         if let Some(mnemonic) = self.mnemonic {
@@ -278,7 +279,8 @@ impl Anvil {
             if is_private_key && line.starts_with('(') {
                 let key_str = &line[6..line.len() - 1];
                 let key_hex = hex::decode(key_str).expect("could not parse as hex");
-                let key = K256SecretKey::from_be_bytes(&key_hex).expect("did not get private key");
+                let key = K256SecretKey::from_bytes(&GenericArray::clone_from_slice(&key_hex))
+                    .expect("did not get private key");
                 addresses.push(secret_key_to_address(&SigningKey::from(&key)));
                 private_keys.push(key);
             }

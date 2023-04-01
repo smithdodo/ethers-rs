@@ -1,3 +1,5 @@
+//! Ethereum data types.
+
 pub type Selector = [u8; 4];
 
 // Re-export common ethereum datatypes with more specific names
@@ -30,7 +32,7 @@ mod uint8;
 pub use uint8::*;
 
 mod i256;
-pub use i256::{Sign, I256};
+pub use i256::{ParseI256Error, Sign, I256};
 
 mod bytes;
 pub use self::bytes::{deserialize_bytes, serialize_bytes, Bytes, ParseBytesError};
@@ -76,3 +78,6 @@ pub mod serde_helpers;
 
 mod syncing;
 pub use syncing::{SyncProgress, SyncingStatus};
+
+mod opcode;
+pub use opcode::Opcode;

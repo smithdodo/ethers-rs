@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
-#![deny(unsafe_code)]
-#![deny(rustdoc::broken_intra_doc_links)]
+#![deny(unsafe_code, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// The [Gas Escalator middleware](crate::gas_escalator::GasEscalatorMiddleware)
 /// is used to re-broadcast transactions with an increasing gas price to guarantee
@@ -36,3 +36,24 @@ pub use policy::PolicyMiddleware;
 /// before the chain tip
 pub mod timelag;
 pub use timelag::TimeLag;
+
+/// The [MiddlewareBuilder](crate::MiddlewareBuilder) provides a way to compose many
+/// [`Middleware`](ethers_providers::Middleware) in a concise way
+pub mod builder;
+pub use builder::MiddlewareBuilder;
+
+// For macro expansions only, not public API.
+// See: [#2235](https://github.com/gakonst/ethers-rs/pull/2235)
+
+#[doc(hidden)]
+#[allow(unused_extern_crates)]
+extern crate self as ethers;
+
+#[doc(hidden)]
+pub use ethers_contract as contract;
+
+#[doc(hidden)]
+pub use ethers_core as core;
+
+#[doc(hidden)]
+pub use ethers_providers as providers;

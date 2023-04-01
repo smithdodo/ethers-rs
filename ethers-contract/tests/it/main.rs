@@ -1,10 +1,14 @@
-#![allow(unused)]
+#![allow(clippy::extra_unused_type_parameters)]
+#![cfg(feature = "abigen")]
 
 mod abigen;
-pub(crate) mod common;
-#[cfg(feature = "abigen")]
-mod console;
-#[cfg(feature = "abigen")]
-mod contract;
 
-fn main() {}
+mod derive;
+
+mod contract_call;
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "celo")))]
+mod common;
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "celo")))]
+mod contract;

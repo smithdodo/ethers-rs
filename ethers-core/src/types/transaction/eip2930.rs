@@ -6,8 +6,9 @@ use open_fastrlp::{
     RlpDecodable as FastRlpDecodable, RlpDecodableWrapper as FastRlpDecodableWrapper,
     RlpEncodable as FastRlpEncodable, RlpEncodableWrapper as FastRlpEncodableWrapper,
 };
-use rlp::{Decodable, RlpStream};
-use rlp_derive::{RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
+use rlp::{
+    Decodable, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper, RlpStream,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -95,6 +96,7 @@ pub enum Eip2930RequestError {
 pub struct Eip2930TransactionRequest {
     #[serde(flatten)]
     pub tx: TransactionRequest,
+    #[serde(rename = "accessList")]
     pub access_list: AccessList,
 }
 
