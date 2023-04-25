@@ -949,13 +949,25 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().subscribe_tx_pool_receipts().await.map_err(MiddlewareError::from_err)
     }
 
+    async fn subscribe_pending_block_receipts(
+        &self,
+    ) -> Result<SubscriptionStream<'_, Self::Provider, Vec<TransactionReceipt>>, Self::Error>
+    where
+        <Self as Middleware>::Provider: PubsubClient,
+    {
+        self.inner().subscribe_pending_block_receipts().await.map_err(MiddlewareError::from_err)
+    }
+
     async fn batch_get_storage_at<T: Into<NameOrAddress> + Send + Sync>(
         &self,
         from: Vec<T>,
         location: H256,
         block: Option<BlockId>,
     ) -> Result<Bytes, Self::Error> {
-        self.inner().batch_get_storage_at(from, location, block).await.map_err(MiddlewareError::from_err)
+        self.inner()
+            .batch_get_storage_at(from, location, block)
+            .await
+            .map_err(MiddlewareError::from_err)
     }
 
     async fn call_bundle<T: Serialize + Debug + Send + Sync>(

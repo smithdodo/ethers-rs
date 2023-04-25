@@ -1119,6 +1119,14 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
     {
         self.subscribe(["txPoolReceipt"]).await
     }
+    async fn subscribe_pending_block_receipts(
+        &self,
+    ) -> Result<SubscriptionStream<'_, P, Vec<TransactionReceipt>>, ProviderError>
+    where
+        P: PubsubClient,
+    {
+        self.subscribe(["pendingBlockReceipts"]).await
+    }
     //=========================================================================
 
     async fn subscribe_logs<'a>(
@@ -1248,7 +1256,7 @@ impl<P: JsonRpcClient> Provider<P> {
         if data.is_empty() {
             return Err(ProviderError::EnsError(format!(
                 "`{ens_name}` resolver ({resolver_address:?}) is invalid."
-            )))
+            )));
         }
 
         let supports_selector = abi::decode(&[ParamType::Bool], data.as_ref())
