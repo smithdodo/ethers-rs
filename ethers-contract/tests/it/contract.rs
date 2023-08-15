@@ -8,7 +8,7 @@ use ethers_core::{
     types::{Address, BlockId, Bytes, Filter, ValueOrArray, H160, H256, U256},
     utils::{keccak256, Anvil},
 };
-use ethers_providers::{Http, Middleware, MiddlewareError, Provider, StreamExt};
+use ethers_providers::{Http, Middleware, MiddlewareError, Provider, StreamExt, Ws};
 use std::{sync::Arc, time::Duration};
 
 #[derive(Debug)]
@@ -57,7 +57,7 @@ impl<M: Middleware> Middleware for NonClone<M> {
 // It exists to ensure that trait bounds on contract internal behave as
 // expected. It should not be run
 fn _it_compiles() {
-    let (abi, _bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, _bytecode) = get_contract("SimpleStorage.json");
 
     // launch anvil
     let anvil = Anvil::new().spawn();
@@ -95,7 +95,7 @@ fn _it_compiles() {
 
 #[tokio::test]
 async fn deploy_and_call_contract() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
 
     // launch anvil
     let anvil = Anvil::new().spawn();
@@ -168,7 +168,7 @@ async fn deploy_and_call_contract() {
 #[tokio::test]
 #[cfg(feature = "abigen")]
 async fn get_past_events() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let anvil = Anvil::new().spawn();
     let client = connect(&anvil, 0);
     let address = client.get_accounts().await.unwrap()[0];
@@ -207,7 +207,7 @@ async fn get_past_events() {
 #[tokio::test]
 #[cfg(feature = "abigen")]
 async fn get_events_with_meta() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let anvil = Anvil::new().spawn();
     let client = connect(&anvil, 0);
     let address = anvil.addresses()[0];
@@ -239,7 +239,7 @@ async fn get_events_with_meta() {
 
 #[tokio::test]
 async fn call_past_state() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let anvil = Anvil::new().spawn();
     let client = connect(&anvil, 0);
     let contract = deploy(client.clone(), abi, bytecode).await;
@@ -293,7 +293,7 @@ async fn call_past_state() {
 #[ignore]
 async fn call_past_hash_test() {
     // geth --dev --http --http.api eth,web3
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let provider = Provider::<Http>::try_from("http://localhost:8545").unwrap();
     let deployer = provider.get_accounts().await.unwrap()[0];
 
@@ -327,7 +327,7 @@ async fn call_past_hash_test() {
 
 #[tokio::test]
 async fn watch_events() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let anvil = Anvil::new().spawn();
     let client = connect(&anvil, 0);
     let contract = deploy(client.clone(), abi.clone(), bytecode).await;
@@ -337,7 +337,7 @@ async fn watch_events() {
     let mut stream = event.stream().await.unwrap();
 
     // Also set up a subscription for the same thing
-    let ws = Provider::connect(anvil.ws_endpoint()).await.unwrap();
+    let ws = Provider::<Ws>::connect(anvil.ws_endpoint()).await.unwrap();
     let contract2 = ethers_contract::Contract::new(contract.address(), abi, ws.into());
     let event2 = contract2.event::<ValueChanged>();
     let mut subscription = event2.subscribe().await.unwrap();
@@ -370,13 +370,13 @@ async fn watch_events() {
 
 #[tokio::test]
 async fn watch_subscription_events_multiple_addresses() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     let anvil = Anvil::new().spawn();
     let client = connect(&anvil, 0);
     let contract_1 = deploy(client.clone(), abi.clone(), bytecode.clone()).await;
     let contract_2 = deploy(client.clone(), abi.clone(), bytecode).await;
 
-    let ws = Provider::connect(anvil.ws_endpoint()).await.unwrap();
+    let ws = Provider::<Ws>::connect(anvil.ws_endpoint()).await.unwrap();
     let filter = Filter::new()
         .address(ValueOrArray::Array(vec![contract_1.address(), contract_2.address()]));
     let mut stream = ws.subscribe_logs(&filter).await.unwrap();
@@ -414,7 +414,7 @@ async fn build_event_of_type() {
 
 #[tokio::test]
 async fn signer_on_node() {
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
     // spawn anvil
     let anvil = Anvil::new().spawn();
 
@@ -446,14 +446,13 @@ async fn signer_on_node() {
 #[tokio::test]
 async fn multicall_aggregate() {
     // get ABI and bytecode for the Multicall contract
-    let (multicall_abi, multicall_bytecode) = compile_contract("Multicall3", "Multicall.sol");
+    let (multicall_abi, multicall_bytecode) = get_contract("Multicall.json");
 
     // get ABI and bytecode for the NotSoSimpleStorage contract
-    let (not_so_simple_abi, not_so_simple_bytecode) =
-        compile_contract("NotSoSimpleStorage", "NotSoSimpleStorage.sol");
+    let (not_so_simple_abi, not_so_simple_bytecode) = get_contract("NotSoSimpleStorage.json");
 
     // get ABI and bytecode for the SimpleStorage contract
-    let (abi, bytecode) = compile_contract("SimpleStorage", "SimpleStorage.sol");
+    let (abi, bytecode) = get_contract("SimpleStorage.json");
 
     // launch anvil
     let anvil = Anvil::new().spawn();
@@ -634,8 +633,7 @@ async fn multicall_aggregate() {
 
     // deploy contract with reverting methods
     let reverting_contract = {
-        let (abi, bytecode) =
-            compile_contract("SimpleRevertingStorage", "SimpleRevertingStorage.sol");
+        let (abi, bytecode) = get_contract("SimpleRevertingStorage.json");
         let f = ContractFactory::new(abi, bytecode, client.clone());
         f.deploy("This contract can revert".to_string()).unwrap().send().await.unwrap()
     };

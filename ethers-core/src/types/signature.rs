@@ -64,24 +64,7 @@ pub struct Signature {
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let sig = <[u8; 65]>::from(self);
-        write!(f, "{}", hex::encode(&sig[..]))
-    }
-}
-
-#[cfg(feature = "eip712")]
-impl Signature {
-    /// Recovers the ethereum address which was used to sign a given EIP712
-    /// typed data payload.
-    ///
-    /// Recovery signature data uses 'Electrum' notation, this means the `v`
-    /// value is expected to be either `27` or `28`.
-    pub fn recover_typed_data<T>(&self, payload: T) -> Result<Address, SignatureError>
-    where
-        T: super::transaction::eip712::Eip712,
-    {
-        let encoded = payload.encode_eip712().map_err(|_| SignatureError::RecoveryError)?;
-        self.recover(encoded)
+        f.write_str(hex::Buffer::<65, false>::new().format(&self.into()))
     }
 }
 
@@ -128,6 +111,19 @@ impl Signature {
         debug_assert_eq!(public_key[0], 0x04);
         let hash = crate::utils::keccak256(&public_key[1..]);
         Ok(Address::from_slice(&hash[12..]))
+    }
+
+    /// Recovers the ethereum address which was used to sign a given EIP712
+    /// typed data payload.
+    ///
+    /// Recovery signature data uses 'Electrum' notation, this means the `v`
+    /// value is expected to be either `27` or `28`.
+    pub fn recover_typed_data<T>(&self, payload: &T) -> Result<Address, SignatureError>
+    where
+        T: super::transaction::eip712::Eip712,
+    {
+        let encoded = payload.encode_eip712().map_err(|_| SignatureError::RecoveryError)?;
+        self.recover(encoded)
     }
 
     /// Retrieves the recovery signature.
@@ -216,9 +212,7 @@ impl FromStr for Signature {
     type Err = SignatureError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        let bytes = hex::decode(s)?;
-        Signature::try_from(&bytes[..])
+        Signature::try_from(&hex::decode(s)?[..])
     }
 }
 
