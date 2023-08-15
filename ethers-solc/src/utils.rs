@@ -283,9 +283,11 @@ pub fn library_fully_qualified_placeholder(name: impl AsRef<str>) -> String {
 
 /// Returns the library hash placeholder as `$hex(library_hash(name))$`
 pub fn library_hash_placeholder(name: impl AsRef<[u8]>) -> String {
-    let hash = library_hash(name);
-    let placeholder = hex::encode(hash);
-    format!("${placeholder}$")
+    let mut s = String::with_capacity(34 + 2);
+    s.push('$');
+    s.push_str(hex::Buffer::<17, false>::new().format(&library_hash(name)));
+    s.push('$');
+    s
 }
 
 /// Returns the library placeholder for the given name
@@ -448,10 +450,8 @@ pub(crate) fn tempdir(name: &str) -> Result<tempfile::TempDir, SolcIoError> {
 /// Reads the json file and deserialize it into the provided type
 pub fn read_json_file<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T, SolcError> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path).map_err(|err| SolcError::io(err, path))?;
-    let file = std::io::BufReader::new(file);
-    let val: T = serde_json::from_reader(file)?;
-    Ok(val)
+    let contents = std::fs::read_to_string(path).map_err(|err| SolcError::io(err, path))?;
+    serde_json::from_str(&contents).map_err(Into::into)
 }
 
 /// Creates the parent directory of the `file` and all its ancestors if it does not exist
@@ -617,13 +617,13 @@ import './../libraries/JBTokens.sol';
 
     #[test]
     fn can_find_import_paths() {
-        let s = r##"//SPDX-License-Identifier: Unlicense
+        let s = r#"//SPDX-License-Identifier: Unlicense
 pragma solidity ^0.8.0;
 import "hardhat/console.sol";
 import "../contract/Contract.sol";
 import { T } from "../Test.sol";
 import { T } from '../Test2.sol';
-"##;
+"#;
         assert_eq!(
             vec!["hardhat/console.sol", "../contract/Contract.sol", "../Test.sol", "../Test2.sol"],
             find_import_paths(s).map(|m| m.as_str()).collect::<Vec<&str>>()

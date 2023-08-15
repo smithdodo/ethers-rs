@@ -1,12 +1,14 @@
-use super::{unused_ports, CliqueConfig, Genesis};
+use super::{CliqueConfig, Genesis};
 use crate::{
     types::{Bytes, H256},
-    utils::secret_key_to_address,
+    utils::{secret_key_to_address, unused_port},
 };
 use k256::ecdsa::SigningKey;
 use std::{
+    borrow::Cow,
     fs::{create_dir, File},
     io::{BufRead, BufReader},
+    net::SocketAddr,
     path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
     time::{Duration, Instant},
@@ -40,7 +42,8 @@ pub enum GethInstanceError {
 
 /// A geth instance. Will close the instance when dropped.
 ///
-/// Construct this using [`Geth`](crate::utils::Geth)
+/// Construct this using [`Geth`](crate::utils::Geth).
+#[derive(Debug)]
 pub struct GethInstance {
     pid: Child,
     port: u16,
@@ -82,7 +85,7 @@ impl GethInstance {
         &self.data_dir
     }
 
-    /// Returns the genesis configuration used to conifugre this instance
+    /// Returns the genesis configuration used to configure this instance
     pub fn genesis(&self) -> &Option<Genesis> {
         &self.genesis
     }
@@ -130,7 +133,7 @@ impl Drop for GethInstance {
 }
 
 /// Whether or not geth is in `dev` mode and configuration options that depend on the mode.
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GethMode {
     /// Options that can be set in dev mode
     Dev(DevOptions),
@@ -145,14 +148,14 @@ impl Default for GethMode {
 }
 
 /// Configuration options that can be set in dev mode.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DevOptions {
     /// The interval at which the dev chain will mine new blocks.
     pub block_time: Option<u64>,
 }
 
 /// Configuration options that cannot be set in dev mode.
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrivateNetOptions {
     /// The p2p port to use.
     pub p2p_port: Option<u16>,
@@ -188,7 +191,8 @@ impl Default for PrivateNetOptions {
 ///
 /// drop(geth); // this will kill the instance
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
+#[must_use = "This Builder struct does nothing unless it is `spawn`ed"]
 pub struct Geth {
     program: Option<PathBuf>,
     port: Option<u16>,
@@ -204,7 +208,8 @@ pub struct Geth {
 
 impl Geth {
     /// Creates an empty Geth builder.
-    /// The default port is 8545. The mnemonic is chosen randomly.
+    ///
+    /// The mnemonic is chosen randomly.
     pub fn new() -> Self {
         Self::default()
     }
@@ -234,7 +239,6 @@ impl Geth {
     ///
     /// By default, it's expected that `geth` is in `$PATH`, see also
     /// [`std::process::Command::new()`]
-    #[must_use]
     pub fn path<T: Into<PathBuf>>(mut self, path: T) -> Self {
         self.program = Some(path.into());
         self
@@ -245,14 +249,15 @@ impl Geth {
     ///
     /// The address derived from this private key will be used to set the `miner.etherbase` field
     /// on the node.
-    #[must_use]
     pub fn set_clique_private_key<T: Into<SigningKey>>(mut self, private_key: T) -> Self {
         self.clique_private_key = Some(private_key.into());
         self
     }
 
     /// Sets the port which will be used when the `geth-cli` instance is launched.
-    #[must_use]
+    ///
+    /// If port is 0 then the OS will choose a random port.
+    /// [GethInstance::port] will return the port that was chosen.
     pub fn port<T: Into<u16>>(mut self, port: T) -> Self {
         self.port = Some(port.into());
         self
@@ -262,7 +267,6 @@ impl Geth {
     ///
     /// This will put the geth instance into non-dev mode, discarding any previously set dev-mode
     /// options.
-    #[must_use]
     pub fn p2p_port(mut self, port: u16) -> Self {
         match self.mode {
             GethMode::Dev(_) => {
@@ -280,21 +284,18 @@ impl Geth {
     ///
     /// This will put the geth instance in `dev` mode, discarding any previously set options that
     /// cannot be used in dev mode.
-    #[must_use]
     pub fn block_time<T: Into<u64>>(mut self, block_time: T) -> Self {
         self.mode = GethMode::Dev(DevOptions { block_time: Some(block_time.into()) });
         self
     }
 
     /// Sets the chain id for the geth instance.
-    #[must_use]
     pub fn chain_id<T: Into<u64>>(mut self, chain_id: T) -> Self {
         self.chain_id = Some(chain_id.into());
         self
     }
 
     /// Allow geth to unlock accounts when rpc apis are open.
-    #[must_use]
     pub fn insecure_unlock(mut self) -> Self {
         self.insecure_unlock = true;
         self
@@ -304,7 +305,6 @@ impl Geth {
     ///
     /// This will put the geth instance into non-dev mode, discarding any previously set dev-mode
     /// options.
-    #[must_use]
     pub fn disable_discovery(mut self) -> Self {
         self.inner_disable_discovery();
         self
@@ -321,14 +321,12 @@ impl Geth {
     }
 
     /// Manually sets the IPC path for the socket manually.
-    #[must_use]
     pub fn ipc_path<T: Into<PathBuf>>(mut self, path: T) -> Self {
         self.ipc_path = Some(path.into());
         self
     }
 
     /// Sets the data directory for geth.
-    #[must_use]
     pub fn data_dir<T: Into<PathBuf>>(mut self, path: T) -> Self {
         self.data_dir = Some(path.into());
         self
@@ -340,21 +338,22 @@ impl Geth {
     /// set to the same value as `data_dir`.
     ///
     /// This is destructive and will overwrite any existing data in the data directory.
-    #[must_use]
     pub fn genesis(mut self, genesis: Genesis) -> Self {
         self.genesis = Some(genesis);
         self
     }
 
     /// Sets the port for authenticated RPC connections.
-    #[must_use]
     pub fn authrpc_port(mut self, port: u16) -> Self {
         self.authrpc_port = Some(port);
         self
     }
 
-    /// Consumes the builder and spawns `geth` with stdout redirected to /dev/null.
-    #[must_use]
+    /// Consumes the builder and spawns `geth`.
+    ///
+    /// # Panics
+    ///
+    /// If spawning the instance fails at any point.
     #[track_caller]
     pub fn spawn(mut self) -> GethInstance {
         let bin_path = match self.program.as_ref() {
@@ -366,19 +365,18 @@ impl Geth {
         // geth uses stderr for its logs
         cmd.stderr(Stdio::piped());
 
-        let mut unused_ports = unused_ports::<3>().into_iter();
-        let mut unused_port = || unused_ports.next().unwrap();
-        let port = if let Some(port) = self.port { port } else { unused_port() };
-        let authrpc_port = if let Some(port) = self.authrpc_port { port } else { unused_port() };
+        // If no port provided, let the os chose it for us
+        let mut port = self.port.unwrap_or(0);
+        let port_s = port.to_string();
 
         // Open the HTTP API
         cmd.arg("--http");
-        cmd.arg("--http.port").arg(port.to_string());
+        cmd.arg("--http.port").arg(&port_s);
         cmd.arg("--http.api").arg(API);
 
         // Open the WS API
         cmd.arg("--ws");
-        cmd.arg("--ws.port").arg(port.to_string());
+        cmd.arg("--ws.port").arg(port_s);
         cmd.arg("--ws.api").arg(API);
 
         // pass insecure unlock flag if set
@@ -392,11 +390,12 @@ impl Geth {
         }
 
         // Set the port for authenticated APIs
+        let authrpc_port = self.authrpc_port.unwrap_or_else(&mut unused_port);
         cmd.arg("--authrpc.port").arg(authrpc_port.to_string());
 
         // use geth init to initialize the datadir if the genesis exists
-        if let Some(ref mut genesis) = self.genesis {
-            if is_clique {
+        if is_clique {
+            if let Some(genesis) = &mut self.genesis {
                 // set up a clique config with an instant sealing period and short (8 block) epoch
                 let clique_config = CliqueConfig { period: Some(0), epoch: Some(8) };
                 genesis.config.clique = Some(clique_config);
@@ -416,7 +415,7 @@ impl Geth {
                 // the entire address
                 cmd.arg("--miner.etherbase").arg(format!("{clique_addr:?}"));
             }
-        } else if is_clique {
+
             let clique_addr =
                 secret_key_to_address(self.clique_private_key.as_ref().expect("is_clique == true"));
 
@@ -455,11 +454,14 @@ impl Geth {
             init_cmd.stderr(Stdio::null());
 
             init_cmd.arg("init").arg(temp_genesis_path);
-            init_cmd
+            let res = init_cmd
                 .spawn()
                 .expect("failed to spawn geth init")
                 .wait()
                 .expect("failed to wait for geth init to exit");
+            if !res.success() {
+                panic!("geth init failed");
+            }
 
             // clean up the temp dir which is now persisted
             std::fs::remove_dir_all(temp_genesis_dir_path)
@@ -476,7 +478,7 @@ impl Geth {
         }
 
         // Dev mode with custom block time
-        let p2p_port = match self.mode {
+        let mut p2p_port = match self.mode {
             GethMode::Dev(DevOptions { block_time }) => {
                 cmd.arg("--dev");
                 if let Some(block_time) = block_time {
@@ -485,7 +487,8 @@ impl Geth {
                 None
             }
             GethMode::NonDev(PrivateNetOptions { p2p_port, discovery }) => {
-                let port = if let Some(port) = p2p_port { port } else { unused_port() };
+                // if no port provided, let the os chose it for us
+                let port = p2p_port.unwrap_or(0);
                 cmd.arg("--port").arg(port.to_string());
 
                 // disable discovery if the flag is set
@@ -531,12 +534,33 @@ impl Geth {
                 p2p_started = true;
             }
 
+            if !matches!(self.mode, GethMode::Dev(_)) {
+                // try to find the p2p port, if not in dev mode
+                if line.contains("New local node record") {
+                    if let Some(port) = extract_value("tcp=", &line) {
+                        p2p_port = port.parse::<u16>().ok();
+                    }
+                }
+            }
+
             // geth 1.9.23 uses "server started" while 1.9.18 uses "endpoint opened"
             // the unauthenticated api is used for regular non-engine API requests
             if line.contains("HTTP endpoint opened") ||
                 (line.contains("HTTP server started") && !line.contains("auth=true"))
             {
+                // Extracts the address from the output
+                if let Some(addr) = extract_endpoint(&line) {
+                    // use the actual http port
+                    port = addr.port();
+                }
+
                 http_started = true;
+            }
+
+            // Encountered an error such as Fatal: Error starting protocol stack: listen tcp
+            // 127.0.0.1:8545: bind: address already in use
+            if line.contains("Fatal:") {
+                panic!("{line}");
             }
 
             if p2p_started && http_started {
@@ -558,90 +582,100 @@ impl Geth {
     }
 }
 
+// extracts the value for the given key and line
+fn extract_value<'a>(key: &str, line: &'a str) -> Option<&'a str> {
+    let mut key = Cow::from(key);
+    if !key.ends_with('=') {
+        key = Cow::from(format!("{}=", key));
+    }
+    line.find(key.as_ref()).map(|pos| {
+        let start = pos + key.len();
+        let end = line[start..].find(' ').map(|i| start + i).unwrap_or(line.len());
+        line[start..end].trim()
+    })
+}
+
+// extracts the value for the given key and line
+fn extract_endpoint(line: &str) -> Option<SocketAddr> {
+    let val = extract_value("endpoint=", line)?;
+    val.parse::<SocketAddr>().ok()
+}
+
 // These tests should use a different datadir for each `Geth` spawned
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_extract_address() {
+        let line = "INFO [07-01|13:20:42.774] HTTP server started                      endpoint=127.0.0.1:8545 auth=false prefix= cors= vhosts=localhost";
+        assert_eq!(extract_endpoint(line), Some(SocketAddr::from(([127, 0, 0, 1], 8545))));
+    }
+
+    #[test]
+    fn port_0() {
+        run_with_tempdir(|_| {
+            let _geth = Geth::new().disable_discovery().port(0u16).spawn();
+        });
+    }
+
+    /// Allows running tests with a temporary directory, which is cleaned up after the function is
+    /// called.
+    ///
+    /// Helps with tests that spawn a helper instance, which has to be dropped before the temporary
+    /// directory is cleaned up.
+    #[track_caller]
+    fn run_with_tempdir(f: impl Fn(&Path)) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_dir_path = temp_dir.path();
+        f(temp_dir_path);
+        #[cfg(not(windows))]
+        temp_dir.close().unwrap();
+    }
 
     #[test]
     fn p2p_port() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
-
-        // disabling discovery should put the geth instance into non-dev mode, and it should have a
-        // p2p port.
-        let geth = Geth::new().disable_discovery().data_dir(temp_dir_path).spawn();
-        let p2p_port = geth.p2p_port();
-        assert!(p2p_port.is_some());
+        run_with_tempdir(|temp_dir_path| {
+            let geth = Geth::new().disable_discovery().data_dir(temp_dir_path).spawn();
+            let p2p_port = geth.p2p_port();
+            assert!(p2p_port.is_some());
+        });
     }
 
     #[test]
     fn explicit_p2p_port() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
-
-        // if a p2p port is explicitly set, it should be used
-        let geth = Geth::new().p2p_port(1234).data_dir(temp_dir_path).spawn();
-        let p2p_port = geth.p2p_port();
-        assert_eq!(p2p_port, Some(1234));
+        run_with_tempdir(|temp_dir_path| {
+            // if a p2p port is explicitly set, it should be used
+            let geth = Geth::new().p2p_port(1234).data_dir(temp_dir_path).spawn();
+            let p2p_port = geth.p2p_port();
+            assert_eq!(p2p_port, Some(1234));
+        });
     }
 
     #[test]
     fn dev_mode() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
-
-        // dev mode should not have a p2p port, and dev should be the default
-        let geth = Geth::new().data_dir(temp_dir_path).spawn();
-        let p2p_port = geth.p2p_port();
-        assert!(p2p_port.is_none());
+        run_with_tempdir(|temp_dir_path| {
+            // dev mode should not have a p2p port, and dev should be the default
+            let geth = Geth::new().data_dir(temp_dir_path).spawn();
+            let p2p_port = geth.p2p_port();
+            assert!(p2p_port.is_none(), "{p2p_port:?}");
+        })
     }
 
     #[test]
-    fn clique_private_key_configured() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
+    fn clique_correctly_configured() {
+        run_with_tempdir(|temp_dir_path| {
+            let private_key = SigningKey::random(&mut rand::thread_rng());
+            let geth = Geth::new()
+                .set_clique_private_key(private_key)
+                .chain_id(1337u64)
+                .data_dir(temp_dir_path)
+                .spawn();
 
-        let private_key = SigningKey::random(&mut rand::thread_rng());
-        let geth = Geth::new()
-            .set_clique_private_key(private_key)
-            .chain_id(1337u64)
-            .data_dir(temp_dir_path)
-            .spawn();
-
-        let clique_private_key = geth.clique_private_key().clone();
-        assert!(clique_private_key.is_some());
-    }
-
-    #[test]
-    fn clique_genesis_configured() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
-
-        let private_key = SigningKey::random(&mut rand::thread_rng());
-        let geth = Geth::new()
-            .set_clique_private_key(private_key)
-            .chain_id(1337u64)
-            .data_dir(temp_dir_path)
-            .spawn();
-
-        let genesis = geth.genesis().clone();
-        assert!(genesis.is_some());
-    }
-
-    #[test]
-    fn clique_p2p_configured() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let temp_dir_path = temp_dir.path().to_path_buf();
-
-        let private_key = SigningKey::random(&mut rand::thread_rng());
-        let geth = Geth::new()
-            .set_clique_private_key(private_key)
-            .chain_id(1337u64)
-            .data_dir(temp_dir_path)
-            .spawn();
-
-        let p2p_port = geth.p2p_port();
-        assert!(p2p_port.is_some());
+            assert!(geth.p2p_port.is_some());
+            assert!(geth.clique_private_key().is_some());
+            assert!(geth.genesis().is_some());
+        })
     }
 }

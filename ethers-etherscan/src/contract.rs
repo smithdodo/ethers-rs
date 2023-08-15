@@ -36,6 +36,9 @@ impl<T: Into<String>> From<T> for SourceCodeEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SourceCodeMetadata {
+    /// Contains just mapped source code.
+    // NOTE: this must come before `Metadata`
+    Sources(HashMap<String, SourceCodeEntry>),
     /// Contains metadata and path mapped source code.
     Metadata {
         /// Programming language of the sources.
@@ -58,6 +61,9 @@ impl SourceCodeMetadata {
             Self::Metadata { sources, .. } => {
                 sources.values().map(|s| s.content.clone()).collect::<Vec<_>>().join("\n")
             }
+            Self::Sources(sources) => {
+                sources.values().map(|s| s.content.clone()).collect::<Vec<_>>().join("\n")
+            }
             Self::SourceCode(s) => s.clone(),
         }
     }
@@ -65,6 +71,7 @@ impl SourceCodeMetadata {
     pub fn language(&self) -> Option<SourceCodeLanguage> {
         match self {
             Self::Metadata { language, .. } => language.clone(),
+            Self::Sources(_) => None,
             Self::SourceCode(_) => None,
         }
     }
@@ -72,6 +79,7 @@ impl SourceCodeMetadata {
     pub fn sources(&self) -> HashMap<String, SourceCodeEntry> {
         match self {
             Self::Metadata { sources, .. } => sources.clone(),
+            Self::Sources(sources) => sources.clone(),
             Self::SourceCode(s) => HashMap::from([("Contract".into(), s.into())]),
         }
     }
@@ -89,6 +97,7 @@ impl SourceCodeMetadata {
                 }
                 None => Ok(None),
             },
+            Self::Sources(_) => Ok(None),
             Self::SourceCode(_) => Ok(None),
         }
     }
@@ -97,6 +106,7 @@ impl SourceCodeMetadata {
     pub fn settings(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Metadata { settings, .. } => settings.as_ref(),
+            Self::Sources(_) => None,
             Self::SourceCode(_) => None,
         }
     }
@@ -312,16 +322,10 @@ impl Client {
     /// # Example
     ///
     /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let abi = client
-    ///         .contract_abi("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-    ///         .await.unwrap();
-    /// # }
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse()?;
+    /// let abi = client.contract_abi(address).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn contract_abi(&self, address: Address) -> Result<Abi> {
         // apply caching
@@ -337,17 +341,34 @@ impl Client {
         }
 
         let query = self.create_query("contract", "getabi", HashMap::from([("address", address)]));
-        let resp: Response<String> = self.get_json(&query).await?;
-        if resp.result.starts_with("Max rate limit reached") {
+        let resp: Response<Option<String>> = self.get_json(&query).await?;
+
+        let result = match resp.result {
+            Some(result) => result,
+            None => {
+                if resp.message.contains("Contract source code not verified") {
+                    return Err(EtherscanError::ContractCodeNotVerified(address))
+                }
+                return Err(EtherscanError::EmptyResult {
+                    message: resp.message,
+                    status: resp.status,
+                })
+            }
+        };
+
+        if result.starts_with("Max rate limit reached") {
             return Err(EtherscanError::RateLimitExceeded)
         }
-        if resp.result.starts_with("Contract source code not verified") {
+
+        if result.starts_with("Contract source code not verified") ||
+            resp.message.starts_with("Contract source code not verified")
+        {
             if let Some(ref cache) = self.cache {
                 cache.set_abi(address, None);
             }
             return Err(EtherscanError::ContractCodeNotVerified(address))
         }
-        let abi = serde_json::from_str(&resp.result)?;
+        let abi = serde_json::from_str(&result)?;
 
         if let Some(ref cache) = self.cache {
             cache.set_abi(address, Some(&abi));
@@ -361,15 +382,11 @@ impl Client {
     /// # Example
     ///
     /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
-    /// # async fn foo() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = Client::new(Chain::Mainnet, "<your_api_key>")?;
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let address = "0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse()?;
     /// let metadata = client.contract_source_code(address).await?;
     /// assert_eq!(metadata.items[0].contract_name, "DAO");
-    /// # Ok(())
-    /// # }
+    /// # Ok(()) }
     /// ```
     pub async fn contract_source_code(&self, address: Address) -> Result<ContractMetadata> {
         // apply caching
