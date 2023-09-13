@@ -1,17 +1,23 @@
 //! Test cases to validate the `abigen!` macro
 
-use ethers_contract::{abigen, ContractError, EthCall, EthError, EthEvent};
+use ethers_contract::{abigen, EthEvent};
 use ethers_core::{
-    abi::{AbiDecode, AbiEncode, Address, Tokenizable},
-    rand::thread_rng,
-    types::{Bytes, U256},
-    utils::Anvil,
+    abi::{AbiDecode, AbiEncode, Tokenizable},
+    types::{Address, Bytes, U256},
 };
+use std::{fmt::Debug, hash::Hash, str::FromStr};
+
+#[cfg(feature = "providers")]
+use ethers_contract::{ContractError, EthCall, EthError};
+#[cfg(feature = "providers")]
+use ethers_core::utils::Anvil;
+#[cfg(feature = "providers")]
 use ethers_providers::{MockProvider, Provider};
-use ethers_signers::{LocalWallet, Signer};
-use std::{fmt::Debug, hash::Hash, str::FromStr, sync::Arc};
+#[cfg(feature = "providers")]
+use std::sync::Arc;
 
 const fn assert_codec<T: AbiDecode + AbiEncode>() {}
+#[cfg(feature = "providers")]
 const fn assert_tokenizeable<T: Tokenizable>() {}
 const fn assert_call<T: AbiEncode + AbiDecode + Default + Tokenizable>() {}
 const fn assert_event<T: EthEvent>() {}
@@ -148,6 +154,7 @@ fn can_generate_internal_structs_2() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_generate_internal_structs_multiple() {
     // NOTE: nesting here is necessary due to how tests are structured...
     use contract::*;
@@ -221,6 +228,7 @@ fn can_generate_return_struct() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_generate_human_readable_with_structs() {
     abigen!(
         SimpleContract,
@@ -268,6 +276,7 @@ fn can_generate_human_readable_with_structs() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_overloaded_functions() {
     abigen!(
         SimpleContract,
@@ -383,6 +392,7 @@ fn can_handle_unique_underscore_functions() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_underscore_numeric() {
     abigen!(
         Test,
@@ -426,6 +436,7 @@ fn can_abican_generate_console_sol() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_generate_nested_types() {
     abigen!(
         Test,
@@ -453,6 +464,7 @@ fn can_generate_nested_types() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_different_calls() {
     abigen!(
         Test,
@@ -470,6 +482,7 @@ fn can_handle_different_calls() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_case_sensitive_calls() {
     abigen!(
         StakedOHM,
@@ -487,6 +500,7 @@ fn can_handle_case_sensitive_calls() {
 }
 
 #[tokio::test]
+#[cfg(feature = "providers")]
 async fn can_deploy_greeter() {
     abigen!(Greeter, "ethers-contract/tests/solidity-contracts/greeter.json",);
     let anvil = Anvil::new().spawn();
@@ -505,6 +519,7 @@ async fn can_deploy_greeter() {
 }
 
 #[tokio::test]
+#[cfg(feature = "providers")]
 async fn can_abiencoderv2_output() {
     abigen!(AbiEncoderv2Test, "ethers-contract/tests/solidity-contracts/Abiencoderv2Test.json");
 
@@ -568,6 +583,7 @@ fn can_handle_overloaded_events() {
 
 #[tokio::test]
 #[cfg(not(feature = "celo"))]
+#[cfg(feature = "providers")]
 async fn can_send_struct_param() {
     abigen!(StructContract, "./tests/solidity-contracts/StructContract.json");
 
@@ -592,6 +608,7 @@ async fn can_send_struct_param() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_generate_seaport_1_0() {
     abigen!(Seaport, "./tests/solidity-contracts/seaport_1_0.json");
 
@@ -768,6 +785,7 @@ fn can_handle_overloaded_function_with_array() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 #[allow(clippy::disallowed_names)]
 fn convert_uses_correct_abi() {
     abigen!(
@@ -806,8 +824,6 @@ fn can_generate_hardhat_console() {
 
 #[test]
 fn abigen_overloaded_methods() {
-    let alice = LocalWallet::new(&mut thread_rng());
-
     abigen!(
         OverloadedFuncs,
         r"[
@@ -823,17 +839,15 @@ fn abigen_overloaded_methods() {
             myfunc(address[2],address,address[]) as myfunc4;
         },
     );
-    let f1 = Myfunc1Call(alice.address(), U256::from(10));
-    let _ = Myfunc2Call(alice.address(), alice.address());
-    let _ = Myfunc3Call(alice.address(), vec![alice.address()]);
-    let f4 = Myfunc4Call(
-        [alice.address(), alice.address()],
-        alice.address(),
-        vec![alice.address(), alice.address(), alice.address(), alice.address()],
-    );
+
+    let address = Address::random();
+    let f1 = Myfunc1Call(address, U256::from(10));
+    let _ = Myfunc2Call(address, address);
+    let _ = Myfunc3Call(address, vec![address]);
+    let f4 = Myfunc4Call([address, address], address, vec![address, address, address, address]);
     assert_eq!(f1.1, U256::from(10));
-    assert_eq!(f4.0, [alice.address(), alice.address()]);
-    assert_eq!(f4.1, alice.address());
+    assert_eq!(f4.0, [address, address]);
+    assert_eq!(f4.1, address);
 }
 
 #[test]
