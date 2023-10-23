@@ -742,10 +742,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
     ) -> Result<Value, ProviderError> {
         match self.request("eth_callBundle", [bundle]).await {
             Ok(value) => Ok(value),
-            Err(err) => {
-                println!("call_bundle err: {:?}", err);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
     async fn send_puissant<T: Serialize + Debug + Send + Sync>(
@@ -754,10 +751,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
     ) -> Result<Value, ProviderError> {
         match self.request("eth_sendPuissant", [bundle]).await {
             Ok(value) => Ok(value),
-            Err(err) => {
-                println!("call_bundle err: {:?}", err);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
     async fn get_transaction_receipts_by_block_number<T: Send + Sync + Into<BlockNumber>>(
@@ -1612,10 +1606,10 @@ pub fn is_local_endpoint(endpoint: &str) -> bool {
             match host {
                 Host::Domain(domain) => return domain.contains("localhost"),
                 Host::Ipv4(ipv4) => {
-                    return ipv4 == Ipv4Addr::LOCALHOST ||
-                        ipv4.is_link_local() ||
-                        ipv4.is_loopback() ||
-                        ipv4.is_private()
+                    return ipv4 == Ipv4Addr::LOCALHOST
+                        || ipv4.is_link_local()
+                        || ipv4.is_loopback()
+                        || ipv4.is_private()
                 }
                 Host::Ipv6(ipv6) => return ipv6.is_loopback(),
             }
