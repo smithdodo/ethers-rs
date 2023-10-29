@@ -749,7 +749,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         &self,
         bundle: T,
     ) -> Result<Value, ProviderError> {
-        match self.request("eth_sendPuissant", [bundle]).await {
+        match self.request("eth_sendPuissant", bundle).await {
             Ok(value) => Ok(value),
             Err(err) => Err(err),
         }
