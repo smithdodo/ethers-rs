@@ -761,6 +761,35 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         let block_number = block_number.into();
         self.request("eth_getTransactionReceiptsByBlockNumber", [block_number]).await
     }
+    async fn send_bundle<T: Into<TypedTransaction> + Send + Sync>(
+        &self,
+        bundle: Vec<T>,
+        block: Option<BlockId>,
+    ) -> Result<Vec<PendingTransaction<'_, P>>, ProviderError> {
+        // todo!()
+        let mut txs = vec![];
+        for t in bundle.into_iter() {
+            let mut tx = t.into();
+            self.fill_transaction(&mut tx, block).await?;
+            txs.push(tx);
+        }
+
+        let tx_hashes: Vec<H256> = self.request("eth_sendBundle", txs).await?;
+        let pending_txs =
+            tx_hashes.into_iter().map(|tx_hash| PendingTransaction::new(tx_hash, self)).collect();
+        Ok(pending_txs)
+    }
+    async fn send_raw_bundle<'a>(
+        &'a self,
+        bundle: Vec<Bytes>,
+    ) -> Result<Vec<PendingTransaction<'a, P>>, ProviderError> {
+        let rlps = bundle.into_iter().map(|raw_tx| utils::serialize(&raw_tx)).collect::<Vec<_>>();
+        let tx_hashes: Vec<H256> = self.request("eth_sendRawBundle", rlps).await?;
+        let pending_txs =
+            tx_hashes.into_iter().map(|tx_hash| PendingTransaction::new(tx_hash, self)).collect();
+        Ok(pending_txs)
+    }
+
     /// ======================================================================
 
     /// Returns the deployed code at a given address

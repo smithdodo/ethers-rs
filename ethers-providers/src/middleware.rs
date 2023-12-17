@@ -1046,6 +1046,19 @@ pub trait Middleware: Sync + Send + Debug {
     ) -> Result<Option<Vec<TransactionReceipt>>, ProviderError> {
         self.inner().get_transaction_receipts_by_block_number(block_number).await
     }
+    async fn send_bundle<T: Into<TypedTransaction> + Send + Sync>(
+        &self,
+        tx: Vec<T>,
+        block: Option<BlockId>,
+    ) -> Result<Vec<PendingTransaction<'_, Self::Provider>>, Self::Error> {
+        self.inner().send_bundle(tx, block).await.map_err(MiddlewareError::from_err)
+    }
+    async fn send_raw_bundle<'a>(
+        &'a self,
+        tx: Vec<Bytes>,
+    ) -> Result<Vec<PendingTransaction<'a, Self::Provider>>, Self::Error> {
+        self.inner().send_raw_bundle(tx).await.map_err(MiddlewareError::from_err)
+    }
     //=========================================================================
 }
 
