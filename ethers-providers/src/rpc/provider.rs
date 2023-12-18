@@ -740,19 +740,13 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         &self,
         bundle: T,
     ) -> Result<Value, ProviderError> {
-        match self.request("eth_callBundle", [bundle]).await {
-            Ok(value) => Ok(value),
-            Err(err) => Err(err),
-        }
+        self.request("eth_callBundle", [bundle]).await
     }
     async fn send_puissant<T: Serialize + Debug + Send + Sync>(
         &self,
         bundle: T,
     ) -> Result<Value, ProviderError> {
-        match self.request("eth_sendPuissant", bundle).await {
-            Ok(value) => Ok(value),
-            Err(err) => Err(err),
-        }
+        self.request("eth_sendPuissant", [bundle]).await
     }
     async fn get_transaction_receipts_by_block_number<T: Send + Sync + Into<BlockNumber>>(
         &self,
