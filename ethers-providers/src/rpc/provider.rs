@@ -784,7 +784,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         bundle: Vec<Bytes>,
     ) -> Result<Vec<PendingTransaction<'a, P>>, ProviderError> {
         let rlps = bundle.into_iter().map(|raw_tx| utils::serialize(&raw_tx)).collect::<Vec<_>>();
-        let tx_hashes: Vec<H256> = self.request("eth_sendRawBundle", rlps).await?;
+        let tx_hashes: Vec<H256> = self.request("eth_sendRawBundle", vec![rlps]).await?;
         let pending_txs =
             tx_hashes.into_iter().map(|tx_hash| PendingTransaction::new(tx_hash, self)).collect();
         Ok(pending_txs)
